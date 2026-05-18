@@ -26,8 +26,19 @@
             -webkit-user-select: none; user-select: none;
         }
 
-        #status-bar { position: fixed; top: 15px; left: 15px; display: flex; gap: 6px; z-index: 100; }
+        #status-bar { position: fixed; top: 15px; left: 15px; display: flex; gap: 8px; align-items: center; z-index: 100; }
         .dot { width: 8px; height: 8px; border-radius: 50%; background: #eee; }
+
+        #sound-toggle {
+            width: 16px; height: 16px;
+            cursor: pointer;
+            color: #ccc;
+            display: flex; align-items: center; justify-content: center;
+            margin-left: 4px;
+        }
+        #sound-toggle:hover { color: #888; }
+        #sound-toggle.on { color: var(--ink); }
+        #sound-toggle svg { width: 100%; height: 100%; display: block; }
 
         #player-count {
             position: fixed; top: 13px; right: 15px; z-index: 100;
@@ -126,6 +137,15 @@
     <div id="status-bar">
         <div id="dot-net" class="dot"></div>
         <div id="dot-local" class="dot"></div>
+        <div id="sound-toggle" title="Sound off — click to enable">
+            <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+                <path id="sound-icon-shape" d="M3 6 L3 10 L6 10 L9 13 L9 3 L6 6 Z" fill="currentColor" stroke="none"/>
+                <line id="sound-x1" x1="11" y1="6" x2="14" y2="10" stroke="currentColor" stroke-width="1.2"/>
+                <line id="sound-x2" x1="11" y1="10" x2="14" y2="6" stroke="currentColor" stroke-width="1.2"/>
+                <path id="sound-wave1" d="M11 6 Q13 8 11 10" fill="none" stroke="currentColor" stroke-width="1.2" style="display:none"/>
+                <path id="sound-wave2" d="M12.5 4.5 Q15.5 8 12.5 11.5" fill="none" stroke="currentColor" stroke-width="1.2" style="display:none"/>
+            </svg>
+        </div>
     </div>
     <div id="player-count">0</div>
 
@@ -170,7 +190,7 @@
         const GRID_RESOLUTION = 100;
         const VIEWBOX = 1000;
         const CELL = VIEWBOX / GRID_RESOLUTION;
-        const WRITE_INTERVAL_MS = 80;
+        const WRITE_INTERVAL_MS = 25;
         const STALE_MS = 15000;
         const PRUNE_MS = 60000;
         const POINTER_OFFSET_CELLS = 3;
@@ -623,6 +643,8 @@
                 isMe: !!isMe,
                 startedAt: now
             };
+            // Sound matches the LOSER's character — Rock got crunched, etc.
+            playSound('got_' + type);
         }
 
         function checkCollision() {
@@ -859,6 +881,212 @@
             requestAnimationFrame(renderPlayers);
         }
         requestAnimationFrame(renderPlayers);
+
+        // ===== Audio =====
+        // Off by default. Click the speaker icon to enable. Pref is session-only
+        // (no cookies / localStorage). To use real audio files, drop them at
+        // these paths and the synthesized fallback will be skipped automatically.
+        const SOUND_PATHS = {
+            join: null,    // e.g. 'sounds/join.wav'
+            got_R: null,   // rock crunch — e.g. 'sounds/rock.wav'
+            got_P: null,   // paper crumple — e.g. 'sounds/paper.wav'
+            got_S: null    // scissors swish — e.g. 'sounds/scissors.wav'
+        };
+        let soundOn = false;
+        let audioCtx = null;
+        const soundBuffers = {}; // path → AudioBuffer (decoded files)
+
+        function ensureAudioCtx() {
+            if (audioCtx) return audioCtx;
+            try {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                audioCtx = new AC();
+            } catch (e) {
+                audioCtx = null;
+            }
+            return audioCtx;
+        }
+
+        async function loadSoundFile(path) {
+            if (!path || soundBuffers[path]) return;
+            const ctx = ensureAudioCtx();
+            if (!ctx) return;
+            try {
+                const res = await fetch(path);
+                const arr = await res.arrayBuffer();
+                const buf = await ctx.decodeAudioData(arr);
+                soundBuffers[path] = buf;
+            } catch (e) {
+                console.warn('Sound load failed:', path, e);
+            }
+        }
+
+        function playBuffer(buf) {
+            const ctx = ensureAudioCtx();
+            if (!ctx || !buf) return;
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            src.connect(ctx.destination);
+            src.start();
+        }
+
+        // ===== Synthesized fallbacks (used when SOUND_PATHS entry is null) =====
+        function synthBoop() {
+            const ctx = ensureAudioCtx();
+            if (!ctx) return;
+            const t0 = ctx.currentTime;
+            const o = ctx.createOscillator();
+            const g = ctx.createGain();
+            o.type = 'sine';
+            o.frequency.setValueAtTime(440, t0);
+            o.frequency.exponentialRampToValueAtTime(880, t0 + 0.12);
+            g.gain.setValueAtTime(0.0001, t0);
+            g.gain.exponentialRampToValueAtTime(0.25, t0 + 0.02);
+            g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+            o.connect(g).connect(ctx.destination);
+            o.start(t0);
+            o.stop(t0 + 0.2);
+        }
+
+        function synthRockCrunch() {
+            const ctx = ensureAudioCtx();
+            if (!ctx) return;
+            const t0 = ctx.currentTime;
+            const dur = 0.18;
+            const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+            const data = buf.getChannelData(0);
+            for (let i = 0; i < data.length; i++) {
+                const env = Math.pow(1 - i / data.length, 2);
+                data[i] = (Math.random() * 2 - 1) * env;
+            }
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            const filter = ctx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 600;
+            const g = ctx.createGain();
+            g.gain.value = 0.4;
+            src.connect(filter).connect(g).connect(ctx.destination);
+            src.start(t0);
+        }
+
+        function synthPaperCrumple() {
+            const ctx = ensureAudioCtx();
+            if (!ctx) return;
+            const t0 = ctx.currentTime;
+            const dur = 0.22;
+            const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+            const data = buf.getChannelData(0);
+            for (let i = 0; i < data.length; i++) {
+                const env = (Math.sin(i / data.length * Math.PI * 3) ** 2) * (1 - i / data.length);
+                data[i] = (Math.random() * 2 - 1) * env;
+            }
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            const filter = ctx.createBiquadFilter();
+            filter.type = 'highpass';
+            filter.frequency.value = 2500;
+            const g = ctx.createGain();
+            g.gain.value = 0.25;
+            src.connect(filter).connect(g).connect(ctx.destination);
+            src.start(t0);
+        }
+
+        function synthScissorsSwish() {
+            const ctx = ensureAudioCtx();
+            if (!ctx) return;
+            const t0 = ctx.currentTime;
+            const makeChirp = (start, f1, f2) => {
+                const o = ctx.createOscillator();
+                const g = ctx.createGain();
+                o.type = 'triangle';
+                o.frequency.setValueAtTime(f1, start);
+                o.frequency.exponentialRampToValueAtTime(f2, start + 0.06);
+                g.gain.setValueAtTime(0.0001, start);
+                g.gain.exponentialRampToValueAtTime(0.2, start + 0.005);
+                g.gain.exponentialRampToValueAtTime(0.0001, start + 0.07);
+                o.connect(g).connect(ctx.destination);
+                o.start(start);
+                o.stop(start + 0.08);
+            };
+            makeChirp(t0, 2200, 3200);
+            makeChirp(t0 + 0.05, 2600, 1800);
+        }
+
+        const SYNTH = {
+            join: synthBoop,
+            got_R: synthRockCrunch,
+            got_P: synthPaperCrumple,
+            got_S: synthScissorsSwish
+        };
+
+        function playSound(name) {
+            if (!soundOn) return;
+            ensureAudioCtx();
+            const path = SOUND_PATHS[name];
+            if (path && soundBuffers[path]) {
+                playBuffer(soundBuffers[path]);
+            } else if (SYNTH[name]) {
+                SYNTH[name]();
+            }
+        }
+
+        // ===== Sound toggle UI =====
+        const soundToggle = document.getElementById('sound-toggle');
+        const soundX1 = document.getElementById('sound-x1');
+        const soundX2 = document.getElementById('sound-x2');
+        const soundWave1 = document.getElementById('sound-wave1');
+        const soundWave2 = document.getElementById('sound-wave2');
+
+        function updateSoundIcon() {
+            soundToggle.classList.toggle('on', soundOn);
+            if (soundOn) {
+                soundX1.style.display = 'none';
+                soundX2.style.display = 'none';
+                soundWave1.style.display = '';
+                soundWave2.style.display = '';
+                soundToggle.title = 'Sound on — click to mute';
+            } else {
+                soundX1.style.display = '';
+                soundX2.style.display = '';
+                soundWave1.style.display = 'none';
+                soundWave2.style.display = 'none';
+                soundToggle.title = 'Sound off — click to enable';
+            }
+        }
+        updateSoundIcon();
+
+        soundToggle.addEventListener('click', () => {
+            soundOn = !soundOn;
+            updateSoundIcon();
+            if (soundOn) {
+                // Autoplay policy: must create/resume AudioContext from a user gesture.
+                const ctx = ensureAudioCtx();
+                if (ctx && ctx.state === 'suspended') ctx.resume();
+                // Preload any file-based sounds so they're ready when events fire.
+                Object.values(SOUND_PATHS).forEach(p => { if (p) loadSoundFile(p); });
+                // Confirmation boop so the user knows it worked.
+                playSound('join');
+            }
+        });
+
+        // ===== Sound: player joined =====
+        // Suppress the first 1.5s so we don't beep for existing players when we connect.
+        let joinSoundArmed = false;
+        setTimeout(() => { joinSoundArmed = true; }, 1500);
+        const knownPlayerIds = new Set();
+
+        playersRef.on('child_added', (snap) => {
+            const id = snap.key;
+            if (knownPlayerIds.has(id)) return;
+            knownPlayerIds.add(id);
+            if (!joinSoundArmed) return;
+            if (id === myId) return; // don't beep at ourselves
+            playSound('join');
+        });
+        playersRef.on('child_removed', (snap) => {
+            knownPlayerIds.delete(snap.key);
+        });
 
         setInterval(() => {
             if (myType) playerRef.update({ lastSeen: Date.now() });
