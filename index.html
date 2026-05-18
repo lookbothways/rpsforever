@@ -14,10 +14,14 @@
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
         html, body { height: 100%; }
         body {
-            margin: 0; padding: 20px; font-family: 'Roboto', sans-serif; font-weight: 100;
+            margin: 0; padding: 20px 20px 30px; font-family: 'Roboto', sans-serif; font-weight: 100;
             background: var(--bg); color: var(--text);
             display: flex; flex-direction: column; align-items: center;
-            min-height: 100vh; overflow: hidden; touch-action: none;
+            min-height: 100vh;
+            min-height: 100dvh;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden; touch-action: none;
             -webkit-user-select: none; user-select: none;
         }
 
@@ -42,13 +46,14 @@
             flex: 1;
             width: 100%;
             display: flex; align-items: center; justify-content: center;
-            margin: 20px 0;
+            margin: 10px 0;
             position: relative;
+            min-height: 0;
         }
         #grid-wrap {
             position: relative;
-            width: min(80vw, 80vh);
-            height: min(80vw, 80vh);
+            width: min(75vw, 65vh);
+            height: min(75vw, 65vh);
             border: 1px solid var(--border);
             background: white;
         }
@@ -78,8 +83,9 @@
 
         #footer {
             width: 100%; max-width: 600px;
-            display: flex; flex-direction: column; align-items: center; gap: 14px;
-            padding-bottom: 20px;
+            display: flex; flex-direction: column; align-items: center; gap: 12px;
+            padding-bottom: 0;
+            flex-shrink: 0;
         }
         #scoreboard {
             display: flex; gap: 40px;
@@ -97,32 +103,21 @@
             background: white;
             border: 1px solid #ddd;
             border-radius: 999px;
-            padding: 10px 36px;
+            padding: 10px 28px;
             cursor: pointer;
             transition: border-color 0.2s ease, color 0.2s ease;
             white-space: nowrap;
+            max-width: 90vw;
         }
         #action-btn:hover { border-color: #999; }
         #action-btn.playing { color: #aaa; }
-        #action-btn.invite { letter-spacing: 2px; }
-
-        #invite-row {
-            display: none;
-            align-items: center; gap: 10px;
-            font-weight: 300; font-size: 0.85rem; color: #888;
-            letter-spacing: 1px;
+        #action-btn.invite {
+            letter-spacing: 1.5px;
+            font-size: 0.85rem;
+            white-space: normal;
+            text-align: center;
+            line-height: 1.4;
         }
-        #invite-row.show { display: flex; }
-        #invite-url { font-family: 'Roboto', monospace, sans-serif; color: #555; }
-        #copy-btn {
-            background: none; border: none; padding: 4px;
-            cursor: pointer; display: flex; align-items: center; justify-content: center;
-            color: #888;
-        }
-        #copy-btn:hover { color: var(--ink); }
-        #copy-btn svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.2; }
-        #copy-feedback { font-size: 0.75rem; color: var(--status-green); opacity: 0; transition: opacity 0.2s ease; }
-        #copy-feedback.show { opacity: 1; }
     </style>
 </head>
 <body>
@@ -133,7 +128,7 @@
     </div>
     <div id="player-count">0</div>
 
-    <div id="identity">You are <span class="name" id="my-name">…</span></div>
+    <div id="identity">You are team <span class="name" id="my-name">…</span></div>
 
     <div id="stage">
         <div id="grid-wrap">
@@ -148,16 +143,6 @@
             <div class="score"><div class="label">S</div><div class="value" id="score-S">0</div></div>
         </div>
         <button id="action-btn">START</button>
-        <div id="invite-row">
-            <span id="invite-url"></span>
-            <button id="copy-btn" title="Copy link">
-                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <rect x="8" y="8" width="12" height="12" rx="1.5"/>
-                    <path d="M16 8V6a1.5 1.5 0 0 0-1.5-1.5h-9A1.5 1.5 0 0 0 4 6v9A1.5 1.5 0 0 0 5.5 16.5H8"/>
-                </svg>
-            </button>
-            <span id="copy-feedback">copied</span>
-        </div>
     </div>
 
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
@@ -166,15 +151,16 @@
 
     <script>
         // ===== Firebase (RPSforever Spark project) =====
-          const firebaseConfig = {
-            apiKey: "AIzaSyDCev1bJXI0jGqKvMzrXnSRcZKEwQhRP8s",
-            authDomain: "rpsforever.firebaseapp.com",
-            databaseURL: "https://rpsforever-default-rtdb.europe-west1.firebasedatabase.app",
-            projectId: "rpsforever",
-            storageBucket: "rpsforever.firebasestorage.app",
-            messagingSenderId: "577664413632",
-            appId: "1:577664413632:web:0efa4b3ab683399a8e6225"
-          };
+        // REPLACE THESE VALUES WITH YOUR NEW RPSforever CONFIG FROM THE FIREBASE CONSOLE
+        const firebaseConfig = {
+          apiKey: "AIzaSyDCev1bJXI0jGqKvMzrXnSRcZKEwQhRP8s",
+          authDomain: "rpsforever.firebaseapp.com",
+          databaseURL: "https://rpsforever-default-rtdb.europe-west1.firebasedatabase.app",
+          projectId: "rpsforever",
+          storageBucket: "rpsforever.firebasestorage.app",
+          messagingSenderId: "577664413632",
+          appId: "1:577664413632:web:0efa4b3ab683399a8e6225"
+        };
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
@@ -188,7 +174,7 @@
         const PRUNE_MS = 60000;
         const POINTER_OFFSET_CELLS = 3;
         const BOT_ID = '__bot__';
-        const BOT_MOVE_INTERVAL_MS = 600;
+        const BOT_MOVE_INTERVAL_MS = 150;
         const BOT_OWNER_TIMEOUT_MS = 5000;
         const ICON_PATHS = { R: null, P: null, S: null };
 
@@ -223,10 +209,6 @@
         const gridWrap = document.getElementById('grid-wrap');
         const svg = document.getElementById('grid-svg');
         const actionBtn = document.getElementById('action-btn');
-        const inviteRow = document.getElementById('invite-row');
-        const inviteUrl = document.getElementById('invite-url');
-        const copyBtn = document.getElementById('copy-btn');
-        const copyFeedback = document.getElementById('copy-feedback');
         const scoreEls = {
             R: document.getElementById('score-R'),
             P: document.getElementById('score-P'),
@@ -324,7 +306,8 @@
                 const current = snap.val() || {};
                 myType = assignTeam(current);
                 myName = makeName(myType);
-                myNameEl.textContent = `${myName} (${myType})`;
+                const teamFull = { R: 'Rock', P: 'Paper', S: 'Scissors' }[myType];
+                myNameEl.textContent = teamFull;
                 playerRef.set({
                     name: myName,
                     type: myType,
@@ -403,33 +386,38 @@
             if (!bot || bot.owner !== myId) return;
             const now = Date.now();
             if (now - (bot.lastMove || 0) < BOT_MOVE_INTERVAL_MS) return;
-            const dx = [-1, 0, 1][Math.floor(Math.random() * 3)];
-            const dy = [-1, 0, 1][Math.floor(Math.random() * 3)];
+            const stepSize = 2;
+            const dx = [-stepSize, 0, stepSize][Math.floor(Math.random() * 3)];
+            const dy = [-stepSize, 0, stepSize][Math.floor(Math.random() * 3)];
             const nx = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.x + dx));
             const ny = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.y + dy));
             botRef.update({ x: nx, y: ny, lastMove: now, owner: myId });
         }
-        setInterval(botStep, 200);
+        setInterval(botStep, 80);
 
         // ===== Buttons =====
         function setButton(state) {
             actionBtn.classList.remove('playing', 'invite');
-            inviteRow.classList.remove('show');
             if (state === 'start') {
                 actionBtn.textContent = 'START';
             } else if (state === 'stop') {
                 actionBtn.textContent = 'STOP';
                 actionBtn.classList.add('playing');
             } else if (state === 'invite') {
-                actionBtn.textContent = 'INVITE YOUR FRIENDS';
+                actionBtn.textContent = 'For multiplayer: Copy and share URL';
                 actionBtn.classList.add('invite');
-                inviteUrl.textContent = window.location.href;
-                inviteRow.classList.add('show');
+            } else if (state === 'copied') {
+                actionBtn.textContent = 'URL copied to clipboard';
+                actionBtn.classList.add('invite');
             }
         }
         actionBtn.addEventListener('click', () => {
             if (!myType) return;
-            if (invited) { doCopy(); return; }
+            if (invited) {
+                doCopy();
+                setButton('copied');
+                return;
+            }
             isPlaying = !isPlaying;
             setButton(isPlaying ? 'stop' : 'start');
             playerRef.update({ active: isPlaying, lastSeen: Date.now() });
@@ -438,24 +426,19 @@
 
         function doCopy() {
             const url = window.location.href;
-            const done = () => {
-                copyFeedback.classList.add('show');
-                setTimeout(() => copyFeedback.classList.remove('show'), 1500);
-            };
             if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(url).then(done).catch(() => fallbackCopy(url, done));
+                navigator.clipboard.writeText(url).catch(() => fallbackCopy(url));
             } else {
-                fallbackCopy(url, done);
+                fallbackCopy(url);
             }
         }
-        function fallbackCopy(text, done) {
+        function fallbackCopy(text) {
             const ta = document.createElement('textarea');
             ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
             document.body.appendChild(ta); ta.select();
-            try { document.execCommand('copy'); done(); } catch (e) {}
+            try { document.execCommand('copy'); } catch (e) {}
             document.body.removeChild(ta);
         }
-        copyBtn.addEventListener('click', doCopy);
 
         // ===== Pointer input =====
         function pointerToGrid(clientX, clientY) {
