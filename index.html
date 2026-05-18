@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>rps</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #ffffff; --text: #333; --border: #eeeeee; --grid-line: #f2f2f2;
+            --status-red: #ff5f57; --status-green: #28c840;
+            --ink: #222;
+        }
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
+        html, body { height: 100%; }
+        body {
+            margin: 0; padding: 20px; font-family: 'Roboto', sans-serif; font-weight: 100;
+            background: var(--bg); color: var(--text);
+            display: flex; flex-direction: column; align-items: center;
+            min-height: 100vh; overflow: hidden; touch-action: none;
+            -webkit-user-select: none; user-select: none;
+        }
+
+        #status-bar { position: fixed; top: 15px; left: 15px; display: flex; gap: 6px; z-index: 100; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #eee; }
+
+        #player-count {
+            position: fixed; top: 13px; right: 15px; z-index: 100;
+            font-size: 0.8rem; font-weight: 300; color: #bbb; letter-spacing: 1px;
+        }
+
+        #identity {
+            margin-top: 10px;
+            font-size: 1.4rem; font-weight: 100; letter-spacing: 1px;
+            color: var(--ink);
+            text-align: center;
+            min-height: 1.8rem;
+        }
+        #identity .name { font-weight: 300; }
+
+        #stage {
+            flex: 1;
+            width: 100%;
+            display: flex; align-items: center; justify-content: center;
+            margin: 20px 0;
+            position: relative;
+        }
+        #grid-wrap {
+            position: relative;
+            width: min(80vw, 80vh);
+            height: min(80vw, 80vh);
+            border: 1px solid var(--border);
+            background: white;
+        }
+        #grid-svg {
+            position: absolute; inset: 0;
+            width: 100%; height: 100%;
+            display: block;
+            cursor: crosshair;
+        }
+        #grid-wrap.playing { cursor: none; }
+        #grid-wrap.playing #grid-svg { cursor: none; }
+
+        .grid-line { stroke: var(--grid-line); stroke-width: 0.5; vector-effect: non-scaling-stroke; }
+        .grid-frame { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; fill: none; }
+
+        .char {
+            font-family: 'Roboto', sans-serif;
+            font-weight: 300;
+            fill: var(--ink);
+            text-anchor: middle;
+            dominant-baseline: middle;
+            pointer-events: none;
+            user-select: none;
+        }
+        .char.me { font-weight: 400; }
+        .char.bot { fill: #bbb; font-style: italic; }
+
+        #footer {
+            width: 100%; max-width: 600px;
+            display: flex; flex-direction: column; align-items: center; gap: 14px;
+            padding-bottom: 20px;
+        }
+        #scoreboard {
+            display: flex; gap: 40px;
+            font-weight: 100; letter-spacing: 2px;
+            color: var(--ink);
+        }
+        .score { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .score .label { font-size: 0.75rem; color: #aaa; letter-spacing: 3px; }
+        .score .value { font-size: 1.6rem; font-weight: 100; }
+
+        #action-btn {
+            font-family: 'Roboto', sans-serif; font-weight: 300;
+            font-size: 1rem; letter-spacing: 4px;
+            color: var(--ink);
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 999px;
+            padding: 10px 36px;
+            cursor: pointer;
+            transition: border-color 0.2s ease, color 0.2s ease;
+            white-space: nowrap;
+        }
+        #action-btn:hover { border-color: #999; }
+        #action-btn.playing { color: #aaa; }
+        #action-btn.invite { letter-spacing: 2px; }
+
+        #invite-row {
+            display: none;
+            align-items: center; gap: 10px;
+            font-weight: 300; font-size: 0.85rem; color: #888;
+            letter-spacing: 1px;
+        }
+        #invite-row.show { display: flex; }
+        #invite-url { font-family: 'Roboto', monospace, sans-serif; color: #555; }
+        #copy-btn {
+            background: none; border: none; padding: 4px;
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            color: #888;
+        }
+        #copy-btn:hover { color: var(--ink); }
+        #copy-btn svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.2; }
+        #copy-feedback { font-size: 0.75rem; color: var(--status-green); opacity: 0; transition: opacity 0.2s ease; }
+        #copy-feedback.show { opacity: 1; }
+    </style>
+</head>
+<body>
+
+    <div id="status-bar">
+        <div id="dot-net" class="dot"></div>
+        <div id="dot-local" class="dot"></div>
+    </div>
+    <div id="player-count">0</div>
+
+    <div id="identity">You are <span class="name" id="my-name">…</span></div>
+
+    <div id="stage">
+        <div id="grid-wrap">
+            <svg id="grid-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+    </div>
+
+    <div id="footer">
+        <div id="scoreboard">
+            <div class="score"><div class="label">R</div><div class="value" id="score-R">0</div></div>
+            <div class="score"><div class="label">P</div><div class="value" id="score-P">0</div></div>
+            <div class="score"><div class="label">S</div><div class="value" id="score-S">0</div></div>
+        </div>
+        <button id="action-btn">START</button>
+        <div id="invite-row">
+            <span id="invite-url"></span>
+            <button id="copy-btn" title="Copy link">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="8" y="8" width="12" height="12" rx="1.5"/>
+                    <path d="M16 8V6a1.5 1.5 0 0 0-1.5-1.5h-9A1.5 1.5 0 0 0 4 6v9A1.5 1.5 0 0 0 5.5 16.5H8"/>
+                </svg>
+            </button>
+            <span id="copy-feedback">copied</span>
+        </div>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+
+    <script>
+        // ===== Firebase (RPSforever Spark project) =====
+          const firebaseConfig = {
+            apiKey: "AIzaSyDCev1bJXI0jGqKvMzrXnSRcZKEwQhRP8s",
+            authDomain: "rpsforever.firebaseapp.com",
+            databaseURL: "https://rpsforever-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "rpsforever",
+            storageBucket: "rpsforever.firebasestorage.app",
+            messagingSenderId: "577664413632",
+            appId: "1:577664413632:web:0efa4b3ab683399a8e6225"
+          };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+        const auth = firebase.auth();
+
+        // ===== Tunables =====
+        const GRID_RESOLUTION = 100;
+        const VIEWBOX = 1000;
+        const CELL = VIEWBOX / GRID_RESOLUTION;
+        const WRITE_INTERVAL_MS = 80;
+        const STALE_MS = 15000;
+        const PRUNE_MS = 60000;
+        const POINTER_OFFSET_CELLS = 3;
+        const BOT_ID = '__bot__';
+        const BOT_MOVE_INTERVAL_MS = 600;
+        const BOT_OWNER_TIMEOUT_MS = 5000;
+        const ICON_PATHS = { R: null, P: null, S: null };
+
+        // ===== State =====
+        const myId = Math.random().toString(36).substr(2, 9);
+        const joinedAt = Date.now();
+        let myType = null;
+        let myName = null;
+        let isPlaying = false;
+        let myX = Math.floor(GRID_RESOLUTION / 2);
+        let myY = Math.floor(GRID_RESOLUTION / 2);
+        let myVisualX = myX;
+        let myVisualY = myY;
+        let lastWrite = 0;
+        let pendingWrite = false;
+        let allPlayers = {};
+        let bot = null;
+        let scores = { R: 0, P: 0, S: 0 };
+        let invited = false;
+
+        const NAME_POOL = {
+            R: ['Boulder','Pebble','Granite','Flint','Slate','Cobble','Quartz','Gravel','Stone','Basalt','Marble','Chalk'],
+            P: ['Origami','Scroll','Letter','Folio','Parchment','Sheet','Page','Notebook','Memo','Card','Atlas','Leaf'],
+            S: ['Shears','Snip','Trim','Clip','Crop','Cutter','Blade','Edge','Sliver','Chop','Slice','Nip']
+        };
+
+        // ===== DOM =====
+        const dotNet = document.getElementById('dot-net');
+        const dotLocal = document.getElementById('dot-local');
+        const myNameEl = document.getElementById('my-name');
+        const playerCountEl = document.getElementById('player-count');
+        const gridWrap = document.getElementById('grid-wrap');
+        const svg = document.getElementById('grid-svg');
+        const actionBtn = document.getElementById('action-btn');
+        const inviteRow = document.getElementById('invite-row');
+        const inviteUrl = document.getElementById('invite-url');
+        const copyBtn = document.getElementById('copy-btn');
+        const copyFeedback = document.getElementById('copy-feedback');
+        const scoreEls = {
+            R: document.getElementById('score-R'),
+            P: document.getElementById('score-P'),
+            S: document.getElementById('score-S')
+        };
+
+        svg.setAttribute('viewBox', `0 0 ${VIEWBOX} ${VIEWBOX}`);
+
+        // ===== Build grid =====
+        const gridLinesGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        svg.appendChild(gridLinesGroup);
+
+        function buildGridLines() {
+            const MAX_LINES = 20;
+            const step = Math.max(1, Math.ceil(GRID_RESOLUTION / MAX_LINES));
+            gridLinesGroup.innerHTML = '';
+            for (let i = step; i < GRID_RESOLUTION; i += step) {
+                const v = i * CELL;
+                const h = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                h.setAttribute('x1', 0); h.setAttribute('x2', VIEWBOX);
+                h.setAttribute('y1', v); h.setAttribute('y2', v);
+                h.setAttribute('class', 'grid-line');
+                gridLinesGroup.appendChild(h);
+
+                const ve = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                ve.setAttribute('y1', 0); ve.setAttribute('y2', VIEWBOX);
+                ve.setAttribute('x1', v); ve.setAttribute('x2', v);
+                ve.setAttribute('class', 'grid-line');
+                gridLinesGroup.appendChild(ve);
+            }
+            const frame = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            frame.setAttribute('x', 0); frame.setAttribute('y', 0);
+            frame.setAttribute('width', VIEWBOX); frame.setAttribute('height', VIEWBOX);
+            frame.setAttribute('class', 'grid-frame');
+            gridLinesGroup.appendChild(frame);
+        }
+        buildGridLines();
+
+        const charsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        svg.appendChild(charsGroup);
+
+        db.ref(".info/connected").on("value", (snap) => {
+            dotNet.style.background = snap.val() ? 'var(--status-green)' : 'var(--status-red)';
+        });
+
+        const playerRef = db.ref('players/' + myId);
+        const playersRef = db.ref('players');
+        const scoresRef = db.ref('scores');
+        const botRef = db.ref('bot');
+
+        auth.signInAnonymously().catch(err => console.warn('Anon auth failed:', err));
+        auth.onAuthStateChanged(() => { joinGame(); });
+
+        function prune() {
+            const cutoff = Date.now() - STALE_MS * 4;
+            playersRef.once('value', (snap) => {
+                snap.forEach(child => {
+                    const p = child.val();
+                    if (!p || !p.lastSeen || p.lastSeen < cutoff) child.ref.remove();
+                });
+            });
+        }
+        playerRef.onDisconnect().remove();
+        setInterval(prune, PRUNE_MS);
+
+        // ===== Team assignment =====
+        function countActiveHumans(currentPlayers) {
+            const counts = { R: 0, P: 0, S: 0, total: 0 };
+            Object.values(currentPlayers || {}).forEach(p => {
+                if (p && p.type && counts.hasOwnProperty(p.type)) {
+                    counts[p.type]++;
+                    counts.total++;
+                }
+            });
+            return counts;
+        }
+        function assignTeam(currentPlayers) {
+            const counts = countActiveHumans(currentPlayers);
+            if (counts.total < 3) {
+                const min = Math.min(counts.R, counts.P, counts.S);
+                const candidates = ['R','P','S'].filter(t => counts[t] === min);
+                return candidates[Math.floor(Math.random() * candidates.length)];
+            }
+            return ['R','P','S'][Math.floor(Math.random() * 3)];
+        }
+        function makeName(type) {
+            const pool = NAME_POOL[type];
+            const base = pool[Math.floor(Math.random() * pool.length)];
+            const num = Math.floor(Math.random() * 90) + 10;
+            return `${base}-${num}`;
+        }
+
+        function joinGame() {
+            playersRef.once('value', (snap) => {
+                const current = snap.val() || {};
+                myType = assignTeam(current);
+                myName = makeName(myType);
+                myNameEl.textContent = `${myName} (${myType})`;
+                playerRef.set({
+                    name: myName,
+                    type: myType,
+                    x: myX,
+                    y: myY,
+                    active: false,
+                    joinedAt: joinedAt,
+                    lastSeen: Date.now()
+                });
+            });
+        }
+
+        playersRef.on('value', (snap) => {
+            allPlayers = snap.val() || {};
+            const now = Date.now();
+            const activeCount = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS).length;
+            playerCountEl.textContent = activeCount;
+            maybeManageBot();
+        });
+
+        botRef.on('value', (snap) => { bot = snap.val(); });
+
+        playerRef.on('value', (snap) => {
+            const me = snap.val();
+            if (!me && myType) {
+                isPlaying = false;
+                setButton('start');
+                joinGame();
+            } else if (me && me.active === false && isPlaying) {
+                isPlaying = false;
+                setButton('start');
+            }
+        });
+
+        scoresRef.on('value', (snap) => {
+            scores = snap.val() || { R: 0, P: 0, S: 0 };
+            scoreEls.R.textContent = scores.R || 0;
+            scoreEls.P.textContent = scores.P || 0;
+            scoreEls.S.textContent = scores.S || 0;
+        });
+
+        // ===== Bot management =====
+        const BEATS = { R: 'S', S: 'P', P: 'R' };
+        function maybeManageBot() {
+            const now = Date.now();
+            const activePlayers = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS);
+            const alone = activePlayers.length <= 1;
+
+            if (alone) {
+                botRef.transaction(curr => {
+                    if (!curr) {
+                        return {
+                            type: pickBotType(),
+                            x: Math.floor(GRID_RESOLUTION / 2),
+                            y: Math.floor(GRID_RESOLUTION / 2),
+                            owner: myId,
+                            lastMove: now
+                        };
+                    }
+                    if (!curr.owner || (now - (curr.lastMove || 0)) > BOT_OWNER_TIMEOUT_MS) {
+                        curr.owner = myId;
+                        curr.lastMove = now;
+                        return curr;
+                    }
+                    return;
+                });
+            } else {
+                if (bot && bot.owner === myId) botRef.remove();
+            }
+        }
+        function pickBotType() {
+            if (myType && BEATS[myType]) return BEATS[myType];
+            return ['R','P','S'][Math.floor(Math.random() * 3)];
+        }
+        function botStep() {
+            if (!bot || bot.owner !== myId) return;
+            const now = Date.now();
+            if (now - (bot.lastMove || 0) < BOT_MOVE_INTERVAL_MS) return;
+            const dx = [-1, 0, 1][Math.floor(Math.random() * 3)];
+            const dy = [-1, 0, 1][Math.floor(Math.random() * 3)];
+            const nx = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.x + dx));
+            const ny = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.y + dy));
+            botRef.update({ x: nx, y: ny, lastMove: now, owner: myId });
+        }
+        setInterval(botStep, 200);
+
+        // ===== Buttons =====
+        function setButton(state) {
+            actionBtn.classList.remove('playing', 'invite');
+            inviteRow.classList.remove('show');
+            if (state === 'start') {
+                actionBtn.textContent = 'START';
+            } else if (state === 'stop') {
+                actionBtn.textContent = 'STOP';
+                actionBtn.classList.add('playing');
+            } else if (state === 'invite') {
+                actionBtn.textContent = 'INVITE YOUR FRIENDS';
+                actionBtn.classList.add('invite');
+                inviteUrl.textContent = window.location.href;
+                inviteRow.classList.add('show');
+            }
+        }
+        actionBtn.addEventListener('click', () => {
+            if (!myType) return;
+            if (invited) { doCopy(); return; }
+            isPlaying = !isPlaying;
+            setButton(isPlaying ? 'stop' : 'start');
+            playerRef.update({ active: isPlaying, lastSeen: Date.now() });
+            dotLocal.style.background = isPlaying ? 'var(--status-green)' : '#eee';
+        });
+
+        function doCopy() {
+            const url = window.location.href;
+            const done = () => {
+                copyFeedback.classList.add('show');
+                setTimeout(() => copyFeedback.classList.remove('show'), 1500);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).then(done).catch(() => fallbackCopy(url, done));
+            } else {
+                fallbackCopy(url, done);
+            }
+        }
+        function fallbackCopy(text, done) {
+            const ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); done(); } catch (e) {}
+            document.body.removeChild(ta);
+        }
+        copyBtn.addEventListener('click', doCopy);
+
+        // ===== Pointer input =====
+        function pointerToGrid(clientX, clientY) {
+            const rect = gridWrap.getBoundingClientRect();
+            const px = (clientX - rect.left) / rect.width;
+            const py = (clientY - rect.top) / rect.height;
+            const offsetFrac = POINTER_OFFSET_CELLS / GRID_RESOLUTION;
+            const adjY = py - offsetFrac;
+            const gx = Math.max(0, Math.min(GRID_RESOLUTION - 1, Math.floor(px * GRID_RESOLUTION)));
+            const gy = Math.max(0, Math.min(GRID_RESOLUTION - 1, Math.floor(adjY * GRID_RESOLUTION)));
+            const cx = Math.max(0, Math.min(GRID_RESOLUTION, px * GRID_RESOLUTION));
+            const cy = Math.max(0, Math.min(GRID_RESOLUTION, adjY * GRID_RESOLUTION));
+            const inside = px >= 0 && px <= 1 && py >= 0 && py <= 1;
+            return { gx, gy, cx, cy, inside };
+        }
+        function handlePointer(clientX, clientY) {
+            if (!isPlaying || !myType) return;
+            const { gx, gy, cx, cy, inside } = pointerToGrid(clientX, clientY);
+            if (!inside) return;
+            myX = gx; myY = gy;
+            myVisualX = cx; myVisualY = cy;
+            scheduleWrite();
+            checkCollision();
+        }
+        function scheduleWrite() {
+            const now = Date.now();
+            if (now - lastWrite >= WRITE_INTERVAL_MS) {
+                doWrite();
+            } else if (!pendingWrite) {
+                pendingWrite = true;
+                setTimeout(() => { pendingWrite = false; doWrite(); }, WRITE_INTERVAL_MS - (now - lastWrite));
+            }
+        }
+        function doWrite() {
+            lastWrite = Date.now();
+            playerRef.update({ x: myX, y: myY, lastSeen: lastWrite, active: isPlaying });
+        }
+        gridWrap.addEventListener('pointermove', (e) => { handlePointer(e.clientX, e.clientY); });
+        gridWrap.addEventListener('pointerdown', (e) => { handlePointer(e.clientX, e.clientY); });
+        window.addEventListener('pointermove', (e) => {
+            if (!isPlaying) return;
+            const rect = gridWrap.getBoundingClientRect();
+            const inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+            if (inside) handlePointer(e.clientX, e.clientY);
+        });
+
+        // ===== Collision =====
+        let lastCollisionAt = 0;
+        function checkCollision() {
+            if (!isPlaying) return;
+            const now = Date.now();
+            if (now - lastCollisionAt < 200) return;
+            for (const id in allPlayers) {
+                if (id === myId) continue;
+                const p = allPlayers[id];
+                if (!p || !p.active || !p.type) continue;
+                if ((now - (p.lastSeen || 0)) > STALE_MS) continue;
+                if (p.x === myX && p.y === myY) {
+                    if (p.type === myType) return;
+                    if (BEATS[myType] === p.type) {
+                        lastCollisionAt = now;
+                        scoresRef.child(myType).transaction(v => (v || 0) + 1);
+                        db.ref('players/' + id).remove();
+                    } else {
+                        lastCollisionAt = now;
+                        scoresRef.child(p.type).transaction(v => (v || 0) + 1);
+                        playerRef.remove();
+                    }
+                    return;
+                }
+            }
+            if (bot && bot.type && bot.x === myX && bot.y === myY) {
+                if (bot.type === myType) return;
+                if (BEATS[myType] === bot.type) {
+                    lastCollisionAt = now;
+                    scoresRef.child(myType).transaction(v => (v || 0) + 1);
+                    botRef.remove();
+                    isPlaying = false;
+                    invited = true;
+                    playerRef.update({ active: false });
+                    setButton('invite');
+                    dotLocal.style.background = '#eee';
+                } else {
+                    lastCollisionAt = now;
+                    scoresRef.child(bot.type).transaction(v => (v || 0) + 1);
+                    playerRef.remove();
+                }
+            }
+        }
+
+        // ===== Rendering =====
+        const visualPos = {};
+        function ensureCharNode(id, type, isMe, isBot) {
+            let node = document.getElementById('char-' + id);
+            if (!node) {
+                node = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                node.setAttribute('id', 'char-' + id);
+                const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                let cls = 'char';
+                if (isMe) cls += ' me';
+                if (isBot) cls += ' bot';
+                t.setAttribute('class', cls);
+                t.setAttribute('font-size', Math.max(14, VIEWBOX / GRID_RESOLUTION * 2.2));
+                t.textContent = type;
+                node.appendChild(t);
+                charsGroup.appendChild(node);
+            }
+            return node;
+        }
+        function renderPlayers() {
+            const now = Date.now();
+            const seen = new Set();
+            const renderList = {};
+            for (const id in allPlayers) {
+                const p = allPlayers[id];
+                if (!p || !p.type) continue;
+                if ((now - (p.lastSeen || 0)) > STALE_MS) continue;
+                renderList[id] = { ...p, _bot: false };
+            }
+            if (renderList[myId]) {
+                renderList[myId].x = myVisualX;
+                renderList[myId].y = myVisualY;
+                renderList[myId].active = isPlaying;
+            }
+            if (bot && bot.type) {
+                renderList[BOT_ID] = { type: bot.type, x: bot.x, y: bot.y, active: true, _bot: true };
+            }
+            for (const id in renderList) {
+                const p = renderList[id];
+                const isMe = id === myId;
+                seen.add(id);
+                let v = visualPos[id];
+                if (!v) v = visualPos[id] = { x: p.x, y: p.y };
+                if (isMe) {
+                    v.x = p.x; v.y = p.y;
+                } else {
+                    const ease = 0.2;
+                    v.x += (p.x - v.x) * ease;
+                    v.y += (p.y - v.y) * ease;
+                }
+                const node = ensureCharNode(id, p.type, isMe, p._bot);
+                const px = (v.x + 0.5) * CELL;
+                const py = (v.y + 0.5) * CELL;
+                const text = node.firstChild;
+                text.setAttribute('x', px);
+                text.setAttribute('y', py);
+                text.style.opacity = p.active ? 1 : 0.35;
+            }
+            charsGroup.querySelectorAll('g').forEach(n => {
+                const id = n.id.replace('char-', '');
+                if (!seen.has(id)) { n.remove(); delete visualPos[id]; }
+            });
+            requestAnimationFrame(renderPlayers);
+        }
+        requestAnimationFrame(renderPlayers);
+
+        setInterval(() => {
+            if (myType) playerRef.update({ lastSeen: Date.now() });
+        }, 4000);
+    </script>
+</body>
+</html>
