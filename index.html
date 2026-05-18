@@ -10,6 +10,7 @@
             --bg: #ffffff; --text: #333; --border: #eeeeee; --grid-line: #f2f2f2;
             --status-red: #ff5f57; --status-green: #28c840;
             --ink: #222;
+            --highlight: #ff3b30;
         }
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
         html, body { height: 100%; }
@@ -71,15 +72,15 @@
 
         .char {
             font-family: 'Roboto', sans-serif;
-            font-weight: 300;
-            fill: var(--ink);
+            font-weight: 700;
+            fill: var(--highlight);
             text-anchor: middle;
             dominant-baseline: middle;
             pointer-events: none;
             user-select: none;
         }
-        .char.me { font-weight: 400; }
-        .char.bot { fill: #bbb; font-style: italic; }
+        .char.me { font-weight: 700; }
+        .char.bot { fill: var(--highlight); opacity: 0.55; font-style: italic; }
 
         #footer {
             width: 100%; max-width: 600px;
@@ -174,7 +175,7 @@
         const PRUNE_MS = 60000;
         const POINTER_OFFSET_CELLS = 3;
         const BOT_ID = '__bot__';
-        const BOT_MOVE_INTERVAL_MS = 150;
+        const BOT_MOVE_INTERVAL_MS = 250;
         const BOT_OWNER_TIMEOUT_MS = 5000;
         const ICON_PATHS = { R: null, P: null, S: null };
 
@@ -326,7 +327,19 @@
             const activeCount = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS).length;
             playerCountEl.textContent = activeCount;
             maybeManageBot();
+            maybeAutoStart(activeCount);
         });
+
+        function maybeAutoStart(activeCount) {
+            // If 2+ real players are present and we're not yet playing, auto-start.
+            // Skip if we're in the post-bot-catch invite state (user is reading the prompt).
+            if (activeCount >= 2 && !isPlaying && myType && !invited) {
+                isPlaying = true;
+                setButton('stop');
+                playerRef.update({ active: true, lastSeen: Date.now() });
+                dotLocal.style.background = 'var(--status-green)';
+            }
+        }
 
         botRef.on('value', (snap) => { bot = snap.val(); });
 
@@ -386,14 +399,13 @@
             if (!bot || bot.owner !== myId) return;
             const now = Date.now();
             if (now - (bot.lastMove || 0) < BOT_MOVE_INTERVAL_MS) return;
-            const stepSize = 2;
-            const dx = [-stepSize, 0, stepSize][Math.floor(Math.random() * 3)];
-            const dy = [-stepSize, 0, stepSize][Math.floor(Math.random() * 3)];
+            const dx = [-1, 0, 1][Math.floor(Math.random() * 3)];
+            const dy = [-1, 0, 1][Math.floor(Math.random() * 3)];
             const nx = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.x + dx));
             const ny = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.y + dy));
             botRef.update({ x: nx, y: ny, lastMove: now, owner: myId });
         }
-        setInterval(botStep, 80);
+        setInterval(botStep, 100);
 
         // ===== Buttons =====
         function setButton(state) {
@@ -414,8 +426,20 @@
         actionBtn.addEventListener('click', () => {
             if (!myType) return;
             if (invited) {
-                doCopy();
-                setButton('copied');
+                // First tap after catching bot: copy URL and show confirmation
+                if (actionBtn.textContent !== 'URL copied to clipboard') {
+                    doCopy();
+                    setButton('copied');
+                    // After a moment, return to start state so they can play again
+                    setTimeout(() => {
+                        invited = false;
+                        if (!isPlaying) setButton('start');
+                    }, 1800);
+                    return;
+                }
+                // (rare path) tap again while showing 'copied' - just reset
+                invited = false;
+                setButton('start');
                 return;
             }
             isPlaying = !isPlaying;
@@ -510,43 +534,108 @@
                     return;
                 }
             }
-            if (bot && bot.type && bot.x === myX && bot.y === myY) {
-                if (bot.type === myType) return;
-                if (BEATS[myType] === bot.type) {
-                    lastCollisionAt = now;
-                    scoresRef.child(myType).transaction(v => (v || 0) + 1);
-                    botRef.remove();
-                    isPlaying = false;
-                    invited = true;
-                    playerRef.update({ active: false });
-                    setButton('invite');
-                    dotLocal.style.background = '#eee';
-                } else {
-                    lastCollisionAt = now;
-                    scoresRef.child(bot.type).transaction(v => (v || 0) + 1);
-                    playerRef.remove();
+            if (bot && bot.type) {
+                // Use a small adjacency tolerance for the bot so it stays catchable
+                // (bot moves on a timer, player movement is finger-driven and they
+                // shouldn't need sub-cell precision to land a hit).
+                const TOL = Math.max(1, Math.floor(GRID_RESOLUTION / 50));
+                const dx = Math.abs(bot.x - myX);
+                const dy = Math.abs(bot.y - myY);
+                if (dx <= TOL && dy <= TOL) {
+                    if (bot.type === myType) return;
+                    if (BEATS[myType] === bot.type) {
+                        lastCollisionAt = now;
+                        scoresRef.child(myType).transaction(v => (v || 0) + 1);
+                        botRef.remove();
+                        isPlaying = false;
+                        invited = true;
+                        playerRef.update({ active: false });
+                        setButton('invite');
+                        dotLocal.style.background = '#eee';
+                    } else {
+                        lastCollisionAt = now;
+                        scoresRef.child(bot.type).transaction(v => (v || 0) + 1);
+                        isPlaying = false;
+                        invited = false;
+                        setButton('start');
+                        dotLocal.style.background = '#eee';
+                        playerRef.remove();
+                    }
                 }
             }
         }
 
         // ===== Rendering =====
+        // Each character is a <g> node. Currently renders a <text> (R/P/S letter).
+        // To swap in SVG icons later: set ICON_PATHS[type] to a URL, then update
+        // renderCharContent() below to emit <image href="..."> instead of <text>.
+        // The character is centered on its grid cell and sized via CHAR_SIZE_CELLS.
+        const CHAR_SIZE_CELLS = 8; // character visual size in grid cells (big & bold like weja)
         const visualPos = {};
-        function ensureCharNode(id, type, isMe, isBot) {
-            let node = document.getElementById('char-' + id);
-            if (!node) {
-                node = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                node.setAttribute('id', 'char-' + id);
+
+        function renderCharContent(node, type, isMe, isBot) {
+            // Clear any existing content
+            while (node.firstChild) node.removeChild(node.firstChild);
+
+            const sizePx = CHAR_SIZE_CELLS * CELL;
+            const iconPath = ICON_PATHS[type];
+
+            if (iconPath) {
+                // Future: SVG icon mode
+                const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+                img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', iconPath);
+                img.setAttribute('href', iconPath);
+                img.setAttribute('width', sizePx);
+                img.setAttribute('height', sizePx);
+                // Position via x/y offset (top-left); we'll set in render loop
+                img.dataset.role = 'icon';
+                let cls = 'char';
+                if (isMe) cls += ' me';
+                if (isBot) cls += ' bot';
+                img.setAttribute('class', cls);
+                node.appendChild(img);
+            } else {
+                // Letter mode (current)
                 const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
                 let cls = 'char';
                 if (isMe) cls += ' me';
                 if (isBot) cls += ' bot';
                 t.setAttribute('class', cls);
-                t.setAttribute('font-size', Math.max(14, VIEWBOX / GRID_RESOLUTION * 2.2));
+                t.setAttribute('font-size', sizePx);
                 t.textContent = type;
+                t.dataset.role = 'letter';
                 node.appendChild(t);
+            }
+        }
+
+        function ensureCharNode(id, type, isMe, isBot) {
+            let node = document.getElementById('char-' + id);
+            if (!node) {
+                node = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                node.setAttribute('id', 'char-' + id);
+                node.dataset.type = type;
+                renderCharContent(node, type, isMe, isBot);
                 charsGroup.appendChild(node);
+            } else if (node.dataset.type !== type) {
+                // Type changed (e.g. team reassigned) - re-render content
+                node.dataset.type = type;
+                renderCharContent(node, type, isMe, isBot);
             }
             return node;
+        }
+
+        function positionCharNode(node, cx, cy) {
+            // cx, cy are pixel center coords
+            const child = node.firstChild;
+            if (!child) return;
+            if (child.dataset.role === 'icon') {
+                const sizePx = CHAR_SIZE_CELLS * CELL;
+                child.setAttribute('x', cx - sizePx / 2);
+                child.setAttribute('y', cy - sizePx / 2);
+            } else {
+                child.setAttribute('x', cx);
+                child.setAttribute('y', cy);
+            }
         }
         function renderPlayers() {
             const now = Date.now();
@@ -558,10 +647,17 @@
                 if ((now - (p.lastSeen || 0)) > STALE_MS) continue;
                 renderList[id] = { ...p, _bot: false };
             }
-            if (renderList[myId]) {
-                renderList[myId].x = myVisualX;
-                renderList[myId].y = myVisualY;
-                renderList[myId].active = isPlaying;
+            // Always render self from local state if we have a type assigned —
+            // ensures the character letter matches our team even if the DB snapshot is stale.
+            if (myType) {
+                renderList[myId] = {
+                    ...(renderList[myId] || {}),
+                    type: myType,
+                    x: myVisualX,
+                    y: myVisualY,
+                    active: isPlaying,
+                    _bot: false
+                };
             }
             if (bot && bot.type) {
                 renderList[BOT_ID] = { type: bot.type, x: bot.x, y: bot.y, active: true, _bot: true };
@@ -582,10 +678,9 @@
                 const node = ensureCharNode(id, p.type, isMe, p._bot);
                 const px = (v.x + 0.5) * CELL;
                 const py = (v.y + 0.5) * CELL;
-                const text = node.firstChild;
-                text.setAttribute('x', px);
-                text.setAttribute('y', py);
-                text.style.opacity = p.active ? 1 : 0.35;
+                positionCharNode(node, px, py);
+                const child = node.firstChild;
+                if (child) child.style.opacity = p.active ? 1 : 0.35;
             }
             charsGroup.querySelectorAll('g').forEach(n => {
                 const id = n.id.replace('char-', '');
