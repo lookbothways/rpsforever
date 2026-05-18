@@ -2,8 +2,6 @@
 
 A constantly-running, anonymous, multiplayer rock-paper-scissors game on a shared grid. No logins, no accounts, no PII. Show up, get assigned a team, chase the other letters.
 
-**Play:** https://lookbothways.github.io/rps/
-
 ## How it works
 
 - On arrival you're anonymously assigned to team **R**, **P**, or **S** — whichever has the fewest players (random if equal).
