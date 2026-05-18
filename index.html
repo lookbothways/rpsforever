@@ -178,6 +178,14 @@
         const BOT_MOVE_INTERVAL_MS = 250;
         const BOT_OWNER_TIMEOUT_MS = 5000;
         const ICON_PATHS = { R: null, P: null, S: null };
+        // Friction: how much the rendered position lags behind the target.
+        // 0 = no smoothing (instant snap), 1 = never moves. 0.15 = light, easy drag.
+        const FRICTION = 0.15;
+        // Score animation: scale to 200% + fade to transparent over this duration.
+        const SCORE_ANIM_MS = 500;
+        // Minimum grid distance away from death point when respawning, so a
+        // got character doesn't re-appear right where they died.
+        const MIN_RESPAWN_DIST_CELLS = Math.max(8, Math.floor(GRID_RESOLUTION / 8));
 
         // ===== State =====
         const myId = Math.random().toString(36).substr(2, 9);
@@ -195,6 +203,12 @@
         let bot = null;
         let scores = { R: 0, P: 0, S: 0 };
         let invited = false;
+        // Death animation pool: keyed by a unique anim id.
+        // Each entry: { id, type, x, y, isBot, isMe, startedAt }
+        // Renderer draws these for SCORE_ANIM_MS, scaling 1→2 and fading 1→0.
+        const dyingChars = {};
+        let myLastDeath = null;
+        let lastBotDeath = null;
 
         const NAME_POOL = {
             R: ['Boulder','Pebble','Granite','Flint','Slate','Cobble','Quartz','Gravel','Stone','Basalt','Marble','Chalk'],
@@ -302,6 +316,28 @@
             return `${base}-${num}`;
         }
 
+        function pickRespawn(awayFrom) {
+            // Returns {x, y} biased away from the awayFrom point by at least
+            // MIN_RESPAWN_DIST_CELLS. If awayFrom is null, returns center.
+            if (!awayFrom) {
+                return { x: Math.floor(GRID_RESOLUTION / 2), y: Math.floor(GRID_RESOLUTION / 2) };
+            }
+            // Try a few random points, pick the first that's far enough away.
+            for (let i = 0; i < 20; i++) {
+                const x = Math.floor(Math.random() * GRID_RESOLUTION);
+                const y = Math.floor(Math.random() * GRID_RESOLUTION);
+                const dx = x - awayFrom.x, dy = y - awayFrom.y;
+                if (Math.sqrt(dx * dx + dy * dy) >= MIN_RESPAWN_DIST_CELLS) {
+                    return { x, y };
+                }
+            }
+            // Fallback: mirror through grid center, which guarantees distance.
+            return {
+                x: GRID_RESOLUTION - 1 - awayFrom.x,
+                y: GRID_RESOLUTION - 1 - awayFrom.y
+            };
+        }
+
         function joinGame() {
             playersRef.once('value', (snap) => {
                 const current = snap.val() || {};
@@ -309,6 +345,11 @@
                 myName = makeName(myType);
                 const teamFull = { R: 'Rock', P: 'Paper', S: 'Scissors' }[myType];
                 myNameEl.textContent = teamFull;
+                // Respawn somewhere new if we just died, otherwise center.
+                const spawn = pickRespawn(myLastDeath);
+                myX = spawn.x; myY = spawn.y;
+                myVisualX = myX; myVisualY = myY;
+                myLastDeath = null;
                 playerRef.set({
                     name: myName,
                     type: myType,
@@ -322,8 +363,22 @@
         }
 
         playersRef.on('value', (snap) => {
-            allPlayers = snap.val() || {};
+            const prev = allPlayers;
+            const next = snap.val() || {};
+            // Detect disappearances: anyone who was present + active in prev
+            // but is now gone from next. We trust this represents a "got"
+            // event and spawn a death animation locally so all clients see it.
+            // (False positives — someone closing the tab — would also animate,
+            // which is fine; it's just a small visual flourish.)
             const now = Date.now();
+            for (const id in prev) {
+                if (id === myId) continue; // local collision already spawned ours
+                if (!next[id] && prev[id] && prev[id].type && prev[id].active
+                    && (now - (prev[id].lastSeen || 0)) < STALE_MS) {
+                    spawnDeath(id, prev[id].type, prev[id].x, prev[id].y, false, false);
+                }
+            }
+            allPlayers = next;
             const activeCount = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS).length;
             playerCountEl.textContent = activeCount;
             maybeManageBot();
@@ -341,7 +396,20 @@
             }
         }
 
-        botRef.on('value', (snap) => { bot = snap.val(); });
+        let prevBot = null;
+        botRef.on('value', (snap) => {
+            const next = snap.val();
+            // Bot disappeared with previous record present: animate its death.
+            // (Only the client that didn't initiate the remove needs this, but
+            // running it everywhere is harmless — the collision code spawned
+            // one on the actor's side; this picks it up for observers.)
+            if (prevBot && prevBot.type && !next) {
+                spawnDeath(BOT_ID, prevBot.type, prevBot.x, prevBot.y, true, false);
+                lastBotDeath = { x: prevBot.x, y: prevBot.y };
+            }
+            prevBot = next;
+            bot = next;
+        });
 
         playerRef.on('value', (snap) => {
             const me = snap.val();
@@ -372,10 +440,23 @@
             if (alone) {
                 botRef.transaction(curr => {
                     if (!curr) {
+                        // Respawn somewhere away from where the bot was last seen
+                        // (which is also typically where the player is, since they
+                        // just caught it). Mirror through center for a clear gap.
+                        let sx = Math.floor(GRID_RESOLUTION / 2);
+                        let sy = Math.floor(GRID_RESOLUTION / 2);
+                        if (lastBotDeath) {
+                            const s = pickRespawn(lastBotDeath);
+                            sx = s.x; sy = s.y;
+                        } else if (myType) {
+                            // First-time spawn: pick a random corner-ish spot
+                            sx = Math.floor(Math.random() * GRID_RESOLUTION);
+                            sy = Math.floor(Math.random() * GRID_RESOLUTION);
+                        }
                         return {
                             type: pickBotType(),
-                            x: Math.floor(GRID_RESOLUTION / 2),
-                            y: Math.floor(GRID_RESOLUTION / 2),
+                            x: sx,
+                            y: sy,
                             owner: myId,
                             lastMove: now
                         };
@@ -511,6 +592,23 @@
 
         // ===== Collision =====
         let lastCollisionAt = 0;
+        const recentDeaths = {}; // victimId -> timestamp; used to dedupe local + listener spawns
+
+        function spawnDeath(victimId, type, x, y, isBot, isMe) {
+            const now = Date.now();
+            if (recentDeaths[victimId] && now - recentDeaths[victimId] < SCORE_ANIM_MS) return;
+            recentDeaths[victimId] = now;
+            const animId = victimId + ':' + now;
+            dyingChars[animId] = {
+                id: animId,
+                type,
+                x, y,
+                isBot: !!isBot,
+                isMe: !!isMe,
+                startedAt: now
+            };
+        }
+
         function checkCollision() {
             if (!isPlaying) return;
             const now = Date.now();
@@ -525,10 +623,13 @@
                     if (BEATS[myType] === p.type) {
                         lastCollisionAt = now;
                         scoresRef.child(myType).transaction(v => (v || 0) + 1);
+                        spawnDeath(id, p.type, p.x, p.y, false, false);
                         db.ref('players/' + id).remove();
                     } else {
                         lastCollisionAt = now;
                         scoresRef.child(p.type).transaction(v => (v || 0) + 1);
+                        spawnDeath(myId, myType, myX, myY, false, true);
+                        myLastDeath = { x: myX, y: myY };
                         playerRef.remove();
                     }
                     return;
@@ -546,6 +647,7 @@
                     if (BEATS[myType] === bot.type) {
                         lastCollisionAt = now;
                         scoresRef.child(myType).transaction(v => (v || 0) + 1);
+                        spawnDeath(BOT_ID, bot.type, bot.x, bot.y, true, false);
                         botRef.remove();
                         isPlaying = false;
                         invited = true;
@@ -555,6 +657,8 @@
                     } else {
                         lastCollisionAt = now;
                         scoresRef.child(bot.type).transaction(v => (v || 0) + 1);
+                        spawnDeath(myId, myType, myX, myY, false, true);
+                        myLastDeath = { x: myX, y: myY };
                         isPlaying = false;
                         invited = false;
                         setButton('start');
@@ -624,10 +728,11 @@
             return node;
         }
 
-        function positionCharNode(node, cx, cy) {
-            // cx, cy are pixel center coords
+        function positionCharNode(node, cx, cy, scale, opacity) {
+            // cx, cy are pixel center coords. scale and opacity are optional.
             const child = node.firstChild;
             if (!child) return;
+            const s = (scale == null) ? 1 : scale;
             if (child.dataset.role === 'icon') {
                 const sizePx = CHAR_SIZE_CELLS * CELL;
                 child.setAttribute('x', cx - sizePx / 2);
@@ -636,6 +741,13 @@
                 child.setAttribute('x', cx);
                 child.setAttribute('y', cy);
             }
+            // Scale around the center via transform (works for both text and image).
+            if (s !== 1) {
+                node.setAttribute('transform', `translate(${cx} ${cy}) scale(${s}) translate(${-cx} ${-cy})`);
+            } else {
+                node.removeAttribute('transform');
+            }
+            if (opacity != null && child) child.style.opacity = opacity;
         }
         function renderPlayers() {
             const now = Date.now();
@@ -647,8 +759,6 @@
                 if ((now - (p.lastSeen || 0)) > STALE_MS) continue;
                 renderList[id] = { ...p, _bot: false };
             }
-            // Always render self from local state if we have a type assigned —
-            // ensures the character letter matches our team even if the DB snapshot is stale.
             if (myType) {
                 renderList[myId] = {
                     ...(renderList[myId] || {}),
@@ -662,30 +772,61 @@
             if (bot && bot.type) {
                 renderList[BOT_ID] = { type: bot.type, x: bot.x, y: bot.y, active: true, _bot: true };
             }
+
+            // Friction blend: every frame, displayed pos moves a fraction of the way
+            // toward the target. FRICTION=0.15 means each frame we keep 15% of old
+            // position and absorb 85% of the new — light drag, very responsive.
+            const blend = 1 - FRICTION;
+
             for (const id in renderList) {
                 const p = renderList[id];
                 const isMe = id === myId;
                 seen.add(id);
                 let v = visualPos[id];
                 if (!v) v = visualPos[id] = { x: p.x, y: p.y };
-                if (isMe) {
-                    v.x = p.x; v.y = p.y;
-                } else {
-                    const ease = 0.2;
-                    v.x += (p.x - v.x) * ease;
-                    v.y += (p.y - v.y) * ease;
-                }
+                v.x += (p.x - v.x) * blend;
+                v.y += (p.y - v.y) * blend;
+
                 const node = ensureCharNode(id, p.type, isMe, p._bot);
                 const px = (v.x + 0.5) * CELL;
                 const py = (v.y + 0.5) * CELL;
-                positionCharNode(node, px, py);
-                const child = node.firstChild;
-                if (child) child.style.opacity = p.active ? 1 : 0.35;
+                positionCharNode(node, px, py, 1, p.active ? 1 : 0.35);
             }
+
             charsGroup.querySelectorAll('g').forEach(n => {
                 const id = n.id.replace('char-', '');
+                if (id.startsWith('death-')) return; // handled by death pass
                 if (!seen.has(id)) { n.remove(); delete visualPos[id]; }
             });
+
+            // ===== Death animations pass =====
+            // For each dying char, draw it scaling 1→2 and fading 1→0 over SCORE_ANIM_MS.
+            for (const animId in dyingChars) {
+                const d = dyingChars[animId];
+                const t = (now - d.startedAt) / SCORE_ANIM_MS;
+                if (t >= 1) {
+                    const dn = document.getElementById('death-' + animId);
+                    if (dn) dn.remove();
+                    delete dyingChars[animId];
+                    continue;
+                }
+                let dn = document.getElementById('death-' + animId);
+                if (!dn) {
+                    dn = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                    dn.setAttribute('id', 'death-' + animId);
+                    dn.dataset.type = d.type;
+                    renderCharContent(dn, d.type, d.isMe, d.isBot);
+                    charsGroup.appendChild(dn);
+                }
+                // Ease-out cubic for the scale/fade — finishes quickly, lingers near end
+                const eased = 1 - Math.pow(1 - t, 3);
+                const scale = 1 + eased;       // 1 → 2 (200%)
+                const opacity = 1 - eased;     // 1 → 0
+                const px = (d.x + 0.5) * CELL;
+                const py = (d.y + 0.5) * CELL;
+                positionCharNode(dn, px, py, scale, opacity);
+            }
+
             requestAnimationFrame(renderPlayers);
         }
         requestAnimationFrame(renderPlayers);
