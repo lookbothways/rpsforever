@@ -179,13 +179,17 @@
         const BOT_OWNER_TIMEOUT_MS = 5000;
         const ICON_PATHS = { R: null, P: null, S: null };
         // Friction: how much the rendered position lags behind the target.
-        // 0 = no smoothing (instant snap), 1 = never moves. 0.15 = light, easy drag.
-        const FRICTION = 0.15;
+        // Higher = more drag. 0.35 gives a clearly visible trail without
+        // feeling sluggish. Range: 0.05 (almost none) → 0.6 (heavy).
+        const FRICTION = 0.35;
         // Score animation: scale to 200% + fade to transparent over this duration.
         const SCORE_ANIM_MS = 500;
         // Minimum grid distance away from death point when respawning, so a
         // got character doesn't re-appear right where they died.
         const MIN_RESPAWN_DIST_CELLS = Math.max(8, Math.floor(GRID_RESOLUTION / 8));
+        // Brief invulnerability after respawn so a fresh player can't be
+        // chain-killed by someone camping the spot. ~1.2s feels fair.
+        const RESPAWN_GRACE_MS = 1200;
 
         // ===== State =====
         const myId = Math.random().toString(36).substr(2, 9);
@@ -209,6 +213,7 @@
         const dyingChars = {};
         let myLastDeath = null;
         let lastBotDeath = null;
+        let respawnedAt = 0; // Date.now() when I last (re)spawned
 
         const NAME_POOL = {
             R: ['Boulder','Pebble','Granite','Flint','Slate','Cobble','Quartz','Gravel','Stone','Basalt','Marble','Chalk'],
@@ -317,25 +322,31 @@
         }
 
         function pickRespawn(awayFrom) {
-            // Returns {x, y} biased away from the awayFrom point by at least
-            // MIN_RESPAWN_DIST_CELLS. If awayFrom is null, returns center.
+            // Returns a corner of the grid (with a small inset so the character
+            // isn't clipped against the edge). If we know where you died, pick
+            // the corner furthest from it so you get a clear escape distance.
+            const inset = Math.max(2, Math.floor(GRID_RESOLUTION / 25));
+            const lo = inset;
+            const hi = GRID_RESOLUTION - 1 - inset;
+            const corners = [
+                { x: lo, y: lo },
+                { x: hi, y: lo },
+                { x: lo, y: hi },
+                { x: hi, y: hi }
+            ];
             if (!awayFrom) {
-                return { x: Math.floor(GRID_RESOLUTION / 2), y: Math.floor(GRID_RESOLUTION / 2) };
+                // Random corner on first spawn
+                return corners[Math.floor(Math.random() * corners.length)];
             }
-            // Try a few random points, pick the first that's far enough away.
-            for (let i = 0; i < 20; i++) {
-                const x = Math.floor(Math.random() * GRID_RESOLUTION);
-                const y = Math.floor(Math.random() * GRID_RESOLUTION);
-                const dx = x - awayFrom.x, dy = y - awayFrom.y;
-                if (Math.sqrt(dx * dx + dy * dy) >= MIN_RESPAWN_DIST_CELLS) {
-                    return { x, y };
-                }
+            // Pick corner with max distance from death point
+            let best = corners[0];
+            let bestDist = -1;
+            for (const c of corners) {
+                const dx = c.x - awayFrom.x, dy = c.y - awayFrom.y;
+                const d = dx * dx + dy * dy;
+                if (d > bestDist) { bestDist = d; best = c; }
             }
-            // Fallback: mirror through grid center, which guarantees distance.
-            return {
-                x: GRID_RESOLUTION - 1 - awayFrom.x,
-                y: GRID_RESOLUTION - 1 - awayFrom.y
-            };
+            return best;
         }
 
         function joinGame() {
@@ -345,11 +356,15 @@
                 myName = makeName(myType);
                 const teamFull = { R: 'Rock', P: 'Paper', S: 'Scissors' }[myType];
                 myNameEl.textContent = teamFull;
-                // Respawn somewhere new if we just died, otherwise center.
                 const spawn = pickRespawn(myLastDeath);
                 myX = spawn.x; myY = spawn.y;
                 myVisualX = myX; myVisualY = myY;
+                // Reset render-side smoothing source so the character visibly drifts
+                // from the corner toward wherever the pointer is now (rather than
+                // snapping straight to the finger).
+                visualPos[myId] = { x: spawn.x, y: spawn.y };
                 myLastDeath = null;
+                respawnedAt = Date.now();
                 playerRef.set({
                     name: myName,
                     type: myType,
@@ -357,6 +372,7 @@
                     y: myY,
                     active: false,
                     joinedAt: joinedAt,
+                    spawnedAt: respawnedAt,
                     lastSeen: Date.now()
                 });
             });
@@ -613,11 +629,15 @@
             if (!isPlaying) return;
             const now = Date.now();
             if (now - lastCollisionAt < 200) return;
+            // Grace period after respawn: pointer moves don't kill or get killed.
+            if (now - respawnedAt < RESPAWN_GRACE_MS) return;
             for (const id in allPlayers) {
                 if (id === myId) continue;
                 const p = allPlayers[id];
                 if (!p || !p.active || !p.type) continue;
                 if ((now - (p.lastSeen || 0)) > STALE_MS) continue;
+                // Respect their respawn grace too — can't kill someone who just spawned.
+                if (p.spawnedAt && (now - p.spawnedAt) < RESPAWN_GRACE_MS) continue;
                 if (p.x === myX && p.y === myY) {
                     if (p.type === myType) return;
                     if (BEATS[myType] === p.type) {
@@ -773,9 +793,10 @@
                 renderList[BOT_ID] = { type: bot.type, x: bot.x, y: bot.y, active: true, _bot: true };
             }
 
-            // Friction blend: every frame, displayed pos moves a fraction of the way
-            // toward the target. FRICTION=0.15 means each frame we keep 15% of old
-            // position and absorb 85% of the new — light drag, very responsive.
+            // Friction blend: every render frame, displayed position moves a fraction
+            // of the way toward the target. FRICTION=0.35 means each frame keeps 35%
+            // of the old position and absorbs 65% of the new — clearly visible drag,
+            // still responsive. Comment-correct now :)
             const blend = 1 - FRICTION;
 
             for (const id in renderList) {
@@ -790,7 +811,15 @@
                 const node = ensureCharNode(id, p.type, isMe, p._bot);
                 const px = (v.x + 0.5) * CELL;
                 const py = (v.y + 0.5) * CELL;
-                positionCharNode(node, px, py, 1, p.active ? 1 : 0.35);
+                // Compute opacity: inactive = dim; in grace window = pulsing
+                let op = p.active ? 1 : 0.35;
+                const graceSrc = isMe ? respawnedAt : (p.spawnedAt || 0);
+                const sinceSpawn = now - graceSrc;
+                if (graceSrc && sinceSpawn < RESPAWN_GRACE_MS) {
+                    // Pulse 0.3 ↔ 0.9 at ~4Hz so it reads as "invulnerable"
+                    op = 0.6 + 0.3 * Math.sin(sinceSpawn / 1000 * Math.PI * 4);
+                }
+                positionCharNode(node, px, py, 1, op);
             }
 
             charsGroup.querySelectorAll('g').forEach(n => {
