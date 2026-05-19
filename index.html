@@ -89,6 +89,33 @@
         #grid-wrap.playing { cursor: none; }
         #grid-wrap.playing #grid-svg { cursor: none; }
 
+        #arena-announce {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 0 8%;
+            color: var(--highlight);
+            font-family: 'Roboto', sans-serif;
+            font-weight: 100;
+            letter-spacing: 2px;
+            font-size: clamp(1.2rem, 4vmin, 2.4rem);
+            pointer-events: none;
+            opacity: 0;
+            line-height: 1.2;
+        }
+        #arena-announce.show {
+            animation: arena-flash 1.4s cubic-bezier(0.2, 0.8, 0.4, 1);
+        }
+        @keyframes arena-flash {
+            0%   { opacity: 0; transform: scale(0.9); }
+            15%  { opacity: 1; transform: scale(1); }
+            70%  { opacity: 1; transform: scale(1); }
+            100% { opacity: 0; transform: scale(1.05); }
+        }
+
         .grid-line { stroke: var(--grid-line); stroke-width: 0.5; vector-effect: non-scaling-stroke; }
         .grid-frame { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; fill: none; }
 
@@ -165,6 +192,7 @@
     <div id="stage">
         <div id="grid-wrap">
             <svg id="grid-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+            <div id="arena-announce"></div>
         </div>
     </div>
 
@@ -212,7 +240,7 @@
         const BOT_MAX_COUNT = 20;            // safety cap
         const BOT_OWNER_TIMEOUT_MS = 4000;   // re-claim ownership if heartbeat stale
         const BOT_KILL_REPLACEMENT_COUNT = 2; // bots spawned per bot kill (escalation)
-        const ICON_PATHS = { R: null, P: null, S: null };
+        const ICON_PATHS = { R: 'rock.png', P: 'paper.png', S: 'scissors.png' };
         // Visual size of a character in grid cells (big & bold like weja).
         // Future SVG icons will be sized to this too.
         const CHAR_SIZE_CELLS = 8;
@@ -259,6 +287,7 @@
         let myLastDeath = null;
         let lastBotKillPos = null;    // last cell where a bot was killed
         let respawnedAt = 0; // Date.now() when I last (re)spawned
+        let lastActiveCount = 0; // tracks player count between updates so we can detect transitions
 
         const NAME_POOL = {
             R: ['Boulder','Pebble','Granite','Flint','Slate','Cobble','Quartz','Gravel','Stone','Basalt','Marble','Chalk'],
@@ -442,6 +471,14 @@
             allPlayers = next;
             const activeCount = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS).length;
             playerCountEl.textContent = activeCount;
+
+            // Detect transition from solo (1) to multiplayer (≥2):
+            // a real human just joined while I was alone with bots.
+            if (lastActiveCount <= 1 && activeCount >= 2) {
+                showArenaAnnouncement('A real human has entered the arena');
+            }
+            lastActiveCount = activeCount;
+
             maybeAutoStart(activeCount);
             maybeInitialBotWipe();
         });
@@ -728,6 +765,20 @@
         }
         setInterval(tickBots, BOT_TICK_MS);
 
+        // ===== Arena announcement =====
+        // Big red Roboto-thin text overlay across the play area, flashes briefly.
+        const arenaAnnounceEl = document.getElementById('arena-announce');
+        function showArenaAnnouncement(text) {
+            arenaAnnounceEl.textContent = text;
+            // Re-trigger animation by removing and re-adding the class
+            arenaAnnounceEl.classList.remove('show');
+            void arenaAnnounceEl.offsetWidth;
+            arenaAnnounceEl.classList.add('show');
+        }
+        arenaAnnounceEl.addEventListener('animationend', () => {
+            arenaAnnounceEl.classList.remove('show');
+        });
+
         // ===== Buttons =====
         function setButton(state) {
             actionBtn.classList.remove('playing', 'invite');
@@ -966,13 +1017,14 @@
             const iconPath = ICON_PATHS[type];
 
             if (iconPath) {
-                // Future: SVG icon mode
+                // Image icon mode (rock.png / paper.png / scissors.png)
                 const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
                 img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', iconPath);
                 img.setAttribute('href', iconPath);
                 img.setAttribute('width', sizePx);
                 img.setAttribute('height', sizePx);
-                // Position via x/y offset (top-left); we'll set in render loop
+                img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+                // Position via x/y offset (top-left); set in render loop
                 img.dataset.role = 'icon';
                 let cls = 'char';
                 if (isMe) cls += ' me';
