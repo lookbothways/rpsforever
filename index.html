@@ -566,7 +566,10 @@
                 owner: myId,
                 spawnedAt: now,
                 lastTick: now
-            }, () => { if (onComplete) onComplete(); });
+            }, (err) => {
+                if (err) console.error('Bot spawn failed (check DB rules for /bots):', err);
+                if (onComplete) onComplete();
+            });
         }
 
         // ===== Initial cleanup =====
