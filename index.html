@@ -205,9 +205,13 @@
         const STALE_MS = 15000;
         const PRUNE_MS = 60000;
         const POINTER_OFFSET_CELLS = 3;
-        const BOT_ID = '__bot__';
-        const BOT_MOVE_INTERVAL_MS = 250;
-        const BOT_OWNER_TIMEOUT_MS = 5000;
+        // Bots: Pong-style movement (vector + velocity, bouncing off walls).
+        // Multiple bots can exist; each gets the player +1 every kill.
+        const BOT_TICK_MS = 50;              // how often the owner advances bots
+        const BOT_SPEED_CELLS_PER_TICK = 1.5; // base speed (per BOT_TICK_MS)
+        const BOT_MAX_COUNT = 20;            // safety cap
+        const BOT_OWNER_TIMEOUT_MS = 4000;   // re-claim ownership if heartbeat stale
+        const BOT_KILL_REPLACEMENT_COUNT = 2; // bots spawned per bot kill (escalation)
         const ICON_PATHS = { R: null, P: null, S: null };
         // Visual size of a character in grid cells (big & bold like weja).
         // Future SVG icons will be sized to this too.
@@ -244,15 +248,16 @@
         let lastWrite = 0;
         let pendingWrite = false;
         let allPlayers = {};
-        let bot = null;
+        let bots = {};                // id -> {type, x, y, dx, dy, owner, spawnedAt, lastTick}
         let scores = { R: 0, P: 0, S: 0 };
         let invited = false;
+        let invitedOnce = false;     // true after the first time we've shown the invite prompt this session
         // Death animation pool: keyed by a unique anim id.
         // Each entry: { id, type, x, y, isBot, isMe, startedAt }
         // Renderer draws these for SCORE_ANIM_MS, scaling 1→2 and fading 1→0.
         const dyingChars = {};
         let myLastDeath = null;
-        let lastBotDeath = null;
+        let lastBotKillPos = null;    // last cell where a bot was killed
         let respawnedAt = 0; // Date.now() when I last (re)spawned
 
         const NAME_POOL = {
@@ -317,7 +322,7 @@
         const playerRef = db.ref('players/' + myId);
         const playersRef = db.ref('players');
         const scoresRef = db.ref('scores');
-        const botRef = db.ref('bot');
+        const botsRef = db.ref('bots');
 
         auth.signInAnonymously().catch(err => console.warn('Anon auth failed:', err));
         auth.onAuthStateChanged(() => { joinGame(); });
@@ -437,7 +442,6 @@
             allPlayers = next;
             const activeCount = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS).length;
             playerCountEl.textContent = activeCount;
-            maybeManageBot();
             maybeAutoStart(activeCount);
         });
 
@@ -452,19 +456,21 @@
             }
         }
 
-        let prevBot = null;
-        botRef.on('value', (snap) => {
-            const next = snap.val();
-            // Bot disappeared with previous record present: animate its death.
-            // (Only the client that didn't initiate the remove needs this, but
-            // running it everywhere is harmless — the collision code spawned
-            // one on the actor's side; this picks it up for observers.)
-            if (prevBot && prevBot.type && !next) {
-                spawnDeath(BOT_ID, prevBot.type, prevBot.x, prevBot.y, true, false);
-                lastBotDeath = { x: prevBot.x, y: prevBot.y };
+        // ===== Multi-bot listener =====
+        // Track per-bot state and detect disappearances for death animation.
+        const prevBots = {};
+        botsRef.on('value', (snap) => {
+            const next = snap.val() || {};
+            // Detect removed bots → spawn death anim where they were
+            for (const id in prevBots) {
+                if (!next[id] && prevBots[id] && prevBots[id].type) {
+                    spawnDeath('bot-' + id, prevBots[id].type, prevBots[id].x, prevBots[id].y, true, false);
+                }
             }
-            prevBot = next;
-            bot = next;
+            bots = next;
+            // Snapshot current bots for next diff
+            for (const k in prevBots) delete prevBots[k];
+            for (const k in next) prevBots[k] = next[k];
         });
 
         playerRef.on('value', (snap) => {
@@ -487,78 +493,175 @@
         });
 
         // ===== Bot management =====
-        const BEATS = { R: 'S', S: 'P', P: 'R' };
-        function maybeManageBot() {
-            const now = Date.now();
-            const activePlayers = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS);
-            const alone = activePlayers.length <= 1;
+        // Architecture:
+        // - Bots are stored at /bots/{id}, each with {type, x, y, dx, dy, owner, spawnedAt, lastTick}
+        // - Each bot has an "owner" — one client responsible for advancing its position.
+        // - Owner runs a tick loop, updating x/y via Pong-style velocity + wall bounce.
+        // - If an owner goes stale (lastTick > BOT_OWNER_TIMEOUT_MS old), another client claims it.
+        // - Leader-election for SPAWNING new bots: the lowest-id active player is the leader
+        //   and is responsible for ensuring at least one bot exists when alone.
+        // - When a player kills a bot, that player spawns 2 replacement bots immediately.
 
-            if (alone) {
-                botRef.transaction(curr => {
-                    if (!curr) {
-                        // Respawn somewhere away from where the bot was last seen
-                        // (which is also typically where the player is, since they
-                        // just caught it). Mirror through center for a clear gap.
-                        let sx = Math.floor(GRID_RESOLUTION / 2);
-                        let sy = Math.floor(GRID_RESOLUTION / 2);
-                        if (lastBotDeath) {
-                            const s = pickRespawn(lastBotDeath);
-                            sx = s.x; sy = s.y;
-                        } else if (myType) {
-                            // First-time spawn: pick a random corner-ish spot
-                            sx = Math.floor(Math.random() * GRID_RESOLUTION);
-                            sy = Math.floor(Math.random() * GRID_RESOLUTION);
-                        }
-                        return {
-                            type: pickBotType(),
-                            x: sx,
-                            y: sy,
-                            owner: myId,
-                            lastMove: now
-                        };
-                    }
-                    if (!curr.owner || (now - (curr.lastMove || 0)) > BOT_OWNER_TIMEOUT_MS) {
-                        curr.owner = myId;
-                        curr.lastMove = now;
-                        // Correct bot type when taking ownership, in case the
-                        // previous owner had a different team.
-                        if (myType && BEATS[myType]) curr.type = BEATS[myType];
-                        return curr;
-                    }
-                    // Also: even if I'm already the owner, fix the type if it's wrong.
-                    if (curr.owner === myId && myType && BEATS[myType] && curr.type !== BEATS[myType]) {
-                        curr.type = BEATS[myType];
-                        return curr;
-                    }
-                    return;
-                });
-            } else {
-                if (bot && bot.owner === myId) botRef.remove();
-            }
+        const BEATS = { R: 'S', S: 'P', P: 'R' };
+
+        function getActivePlayerIds() {
+            const now = Date.now();
+            return Object.keys(allPlayers).filter(id => {
+                const p = allPlayers[id];
+                return p && p.lastSeen && (now - p.lastSeen) < STALE_MS;
+            });
         }
+
+        function isLeader() {
+            // Deterministic leader: smallest player ID among active players.
+            const ids = getActivePlayerIds().sort();
+            return ids.length > 0 && ids[0] === myId;
+        }
+
         function pickBotType() {
             // Bot should always be the type the current player beats.
-            // If we don't know our type yet, pick at random; it'll be corrected
-            // on the next botStep once myType is set.
+            // (In solo mode all bots are this type; in multi-player there are no bots anyway.)
             if (myType && BEATS[myType]) return BEATS[myType];
             return ['R','P','S'][Math.floor(Math.random() * 3)];
         }
-        function botStep() {
-            if (!bot || bot.owner !== myId) return;
-            const now = Date.now();
-            if (now - (bot.lastMove || 0) < BOT_MOVE_INTERVAL_MS) return;
-            // Keep bot type in sync with "what the player beats".
-            // If the player's team changed (e.g. after losing and rejoining),
-            // the bot's type might be stuck on something unbeatable. Correct it.
-            const desiredType = pickBotType();
-            const typePatch = (bot.type !== desiredType) ? { type: desiredType } : {};
-            const dx = [-1, 0, 1][Math.floor(Math.random() * 3)];
-            const dy = [-1, 0, 1][Math.floor(Math.random() * 3)];
-            const nx = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.x + dx));
-            const ny = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.y + dy));
-            botRef.update({ x: nx, y: ny, lastMove: now, owner: myId, ...typePatch });
+
+        function randomBotVelocity() {
+            // Random direction with speed BOT_SPEED_CELLS_PER_TICK
+            const angle = Math.random() * Math.PI * 2;
+            return {
+                dx: Math.cos(angle) * BOT_SPEED_CELLS_PER_TICK,
+                dy: Math.sin(angle) * BOT_SPEED_CELLS_PER_TICK
+            };
         }
-        setInterval(botStep, 100);
+
+        function spawnBot(spawnPos) {
+            // Adds a new bot to the database, owned by me.
+            const now = Date.now();
+            const id = Math.random().toString(36).substr(2, 9);
+            const v = randomBotVelocity();
+            let sx, sy;
+            if (spawnPos) {
+                sx = spawnPos.x; sy = spawnPos.y;
+            } else {
+                // Random position with a slight inset from walls
+                sx = 5 + Math.floor(Math.random() * (GRID_RESOLUTION - 10));
+                sy = 5 + Math.floor(Math.random() * (GRID_RESOLUTION - 10));
+            }
+            botsRef.child(id).set({
+                type: pickBotType(),
+                x: sx,
+                y: sy,
+                dx: v.dx,
+                dy: v.dy,
+                owner: myId,
+                spawnedAt: now,
+                lastTick: now
+            });
+        }
+
+        // Periodic management: ensure correct number of bots exist (solo only),
+        // claim ownership of any orphaned bots, drop ownership when multiplayer.
+        function manageBots() {
+            const now = Date.now();
+            const activeIds = getActivePlayerIds();
+            const alone = activeIds.length <= 1;
+            const botCount = Object.keys(bots).length;
+
+            if (!alone) {
+                // Multiplayer: leader clears bots.
+                if (isLeader() && botCount > 0) {
+                    botsRef.remove();
+                }
+                return;
+            }
+
+            // Solo: ensure at least 1 bot exists. Only the leader spawns to avoid races.
+            if (alone && isLeader() && botCount === 0 && myType) {
+                spawnBot(lastBotKillPos);
+            }
+
+            // Claim orphaned bots: any bot whose owner is stale becomes mine.
+            for (const id in bots) {
+                const b = bots[id];
+                if (!b) continue;
+                if (b.owner !== myId && (now - (b.lastTick || 0)) > BOT_OWNER_TIMEOUT_MS) {
+                    botsRef.child(id).update({ owner: myId, lastTick: now });
+                }
+            }
+        }
+        setInterval(manageBots, 1000);
+
+        // Tick: advance all bots I own. Pong-style straight lines + wall bounce + bot-bot bounce.
+        function tickBots() {
+            const now = Date.now();
+            // Snapshot local positions so we don't double-collide within one frame.
+            const mine = {};
+            for (const id in bots) {
+                if (bots[id] && bots[id].owner === myId) mine[id] = { ...bots[id] };
+            }
+            if (Object.keys(mine).length === 0) return;
+
+            // Compute next positions with wall bounce
+            for (const id in mine) {
+                const b = mine[id];
+                let nx = b.x + b.dx;
+                let ny = b.y + b.dy;
+                let ndx = b.dx, ndy = b.dy;
+                // Inset bounce so bots stay fully inside the grid
+                const lo = 0, hi = GRID_RESOLUTION - 1;
+                if (nx <= lo) { nx = lo; ndx = Math.abs(ndx); }
+                else if (nx >= hi) { nx = hi; ndx = -Math.abs(ndx); }
+                if (ny <= lo) { ny = lo; ndy = Math.abs(ndy); }
+                else if (ny >= hi) { ny = hi; ndy = -Math.abs(ndy); }
+                b._next = { x: nx, y: ny, dx: ndx, dy: ndy };
+            }
+
+            // Bot-bot collisions: any pair of bots that are about to occupy
+            // close cells bounces off each other. Since we only own a subset,
+            // we collide owned bots against ALL bots (including non-owned),
+            // but only update owned ones.
+            const collisionThreshold = COLLISION_RADIUS_CELLS * 2;
+            const cThreshSq = collisionThreshold * collisionThreshold;
+            for (const id in mine) {
+                const a = mine[id];
+                for (const otherId in bots) {
+                    if (otherId === id) continue;
+                    const o = bots[otherId];
+                    if (!o) continue;
+                    const ox = (mine[otherId] && mine[otherId]._next) ? mine[otherId]._next.x : o.x;
+                    const oy = (mine[otherId] && mine[otherId]._next) ? mine[otherId]._next.y : o.y;
+                    const ddx = a._next.x - ox;
+                    const ddy = a._next.y - oy;
+                    if (ddx * ddx + ddy * ddy < cThreshSq) {
+                        // Elastic-ish bounce: reflect velocity along the collision axis.
+                        const len = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
+                        const nx = ddx / len, ny = ddy / len;
+                        // Reflect a's velocity over the normal
+                        const vdot = a._next.dx * nx + a._next.dy * ny;
+                        if (vdot < 0) {
+                            a._next.dx = a._next.dx - 2 * vdot * nx;
+                            a._next.dy = a._next.dy - 2 * vdot * ny;
+                            // Nudge a out of overlap so they don't stick
+                            a._next.x = ox + nx * collisionThreshold;
+                            a._next.y = oy + ny * collisionThreshold;
+                            // Re-clamp to grid bounds
+                            a._next.x = Math.max(0, Math.min(GRID_RESOLUTION - 1, a._next.x));
+                            a._next.y = Math.max(0, Math.min(GRID_RESOLUTION - 1, a._next.y));
+                        }
+                    }
+                }
+            }
+
+            // Write back
+            for (const id in mine) {
+                const n = mine[id]._next;
+                botsRef.child(id).update({
+                    x: n.x, y: n.y, dx: n.dx, dy: n.dy,
+                    lastTick: now, owner: myId
+                });
+            }
+        }
+        setInterval(tickBots, BOT_TICK_MS);
 
         // ===== Buttons =====
         function setButton(state) {
@@ -723,21 +826,54 @@
                     return;
                 }
             }
-            if (bot && bot.type && isHit(bot.x, bot.y, myX, myY)) {
-                if (bot.type === myType) return;
-                if (BEATS[myType] === bot.type) {
+            // Loop over all bots — collision with any bot the player beats
+            // causes a kill + spawns BOT_KILL_REPLACEMENT_COUNT new bots.
+            for (const bid in bots) {
+                const b = bots[bid];
+                if (!b || !b.type) continue;
+                // Honor a brief invulnerability after spawn (player can't get killed by a fresh bot)
+                if (b.spawnedAt && (now - b.spawnedAt) < RESPAWN_GRACE_MS) continue;
+                if (!isHit(b.x, b.y, myX, myY)) continue;
+
+                if (b.type === myType) continue;
+                if (BEATS[myType] === b.type) {
+                    // Player kills bot → score, remove this bot, spawn 2 new ones.
                     lastCollisionAt = now;
                     scoresRef.child(myType).transaction(v => (v || 0) + 1);
-                    spawnDeath(BOT_ID, bot.type, bot.x, bot.y, true, false);
-                    botRef.remove();
-                    isPlaying = false;
-                    invited = true;
-                    playerRef.update({ active: false });
-                    setButton('invite');
-                    dotLocal.style.background = '#eee';
+                    spawnDeath('bot-' + bid, b.type, b.x, b.y, true, false);
+                    lastBotKillPos = { x: b.x, y: b.y };
+                    botsRef.child(bid).remove();
+                    // Spawn replacements at varied positions away from current player location.
+                    // Respect safety cap so escalation doesn't run away.
+                    const room = BOT_MAX_COUNT - Object.keys(bots).length;
+                    const toSpawn = Math.max(0, Math.min(BOT_KILL_REPLACEMENT_COUNT, room));
+                    for (let i = 0; i < toSpawn; i++) {
+                        // Spread them around: opposite corner area + random scatter
+                        const cornerX = (myX < GRID_RESOLUTION / 2) ? GRID_RESOLUTION - 10 : 10;
+                        const cornerY = (myY < GRID_RESOLUTION / 2) ? GRID_RESOLUTION - 10 : 10;
+                        const scatter = 15;
+                        spawnBot({
+                            x: Math.max(0, Math.min(GRID_RESOLUTION - 1,
+                                cornerX + (Math.random() - 0.5) * scatter)),
+                            y: Math.max(0, Math.min(GRID_RESOLUTION - 1,
+                                cornerY + (Math.random() - 0.5) * scatter))
+                        });
+                    }
+                    // Show invite prompt only the FIRST time the player gets a bot in a session.
+                    // After that, just keep playing (the game escalates).
+                    if (!invitedOnce) {
+                        invitedOnce = true;
+                        isPlaying = false;
+                        invited = true;
+                        playerRef.update({ active: false });
+                        setButton('invite');
+                        dotLocal.style.background = '#eee';
+                    }
+                    return;
                 } else {
+                    // Player loses to this bot
                     lastCollisionAt = now;
-                    scoresRef.child(bot.type).transaction(v => (v || 0) + 1);
+                    scoresRef.child(b.type).transaction(v => (v || 0) + 1);
                     spawnDeath(myId, myType, myX, myY, false, true);
                     myLastDeath = { x: myX, y: myY };
                     isPlaying = false;
@@ -745,6 +881,7 @@
                     setButton('start');
                     dotLocal.style.background = '#eee';
                     playerRef.remove();
+                    return;
                 }
             }
         }
@@ -848,8 +985,18 @@
                     _bot: false
                 };
             }
-            if (bot && bot.type) {
-                renderList[BOT_ID] = { type: bot.type, x: bot.x, y: bot.y, active: true, _bot: true };
+            // Render all bots
+            for (const bid in bots) {
+                const b = bots[bid];
+                if (!b || !b.type) continue;
+                renderList['bot-' + bid] = {
+                    type: b.type,
+                    x: b.x,
+                    y: b.y,
+                    active: true,
+                    spawnedAt: b.spawnedAt,
+                    _bot: true
+                };
             }
 
             // Friction blend: every render frame, displayed position moves a fraction
