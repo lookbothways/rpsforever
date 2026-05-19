@@ -198,6 +198,15 @@
         const BOT_MOVE_INTERVAL_MS = 250;
         const BOT_OWNER_TIMEOUT_MS = 5000;
         const ICON_PATHS = { R: null, P: null, S: null };
+        // Visual size of a character in grid cells (big & bold like weja).
+        // Future SVG icons will be sized to this too.
+        const CHAR_SIZE_CELLS = 8;
+        // Collision: circular distance check between character centers.
+        // CHAR_SIZE_CELLS = 8 means each character is ~4 cells from center to edge.
+        // Two characters touch when their centers are within (radius_a + radius_b) cells.
+        // We add a small forgiveness margin so the game feels generous, not pixel-precise.
+        const COLLISION_FORGIVENESS_CELLS = 1.5;
+        const COLLISION_RADIUS_CELLS = CHAR_SIZE_CELLS / 2 + COLLISION_FORGIVENESS_CELLS;
         // Friction: how much the rendered position lags behind the target.
         // Higher = more drag. 0.35 gives a clearly visible trail without
         // feeling sluggish. Range: 0.05 (almost none) → 0.6 (heavy).
@@ -500,6 +509,14 @@
                     if (!curr.owner || (now - (curr.lastMove || 0)) > BOT_OWNER_TIMEOUT_MS) {
                         curr.owner = myId;
                         curr.lastMove = now;
+                        // Correct bot type when taking ownership, in case the
+                        // previous owner had a different team.
+                        if (myType && BEATS[myType]) curr.type = BEATS[myType];
+                        return curr;
+                    }
+                    // Also: even if I'm already the owner, fix the type if it's wrong.
+                    if (curr.owner === myId && myType && BEATS[myType] && curr.type !== BEATS[myType]) {
+                        curr.type = BEATS[myType];
                         return curr;
                     }
                     return;
@@ -509,6 +526,9 @@
             }
         }
         function pickBotType() {
+            // Bot should always be the type the current player beats.
+            // If we don't know our type yet, pick at random; it'll be corrected
+            // on the next botStep once myType is set.
             if (myType && BEATS[myType]) return BEATS[myType];
             return ['R','P','S'][Math.floor(Math.random() * 3)];
         }
@@ -516,11 +536,16 @@
             if (!bot || bot.owner !== myId) return;
             const now = Date.now();
             if (now - (bot.lastMove || 0) < BOT_MOVE_INTERVAL_MS) return;
+            // Keep bot type in sync with "what the player beats".
+            // If the player's team changed (e.g. after losing and rejoining),
+            // the bot's type might be stuck on something unbeatable. Correct it.
+            const desiredType = pickBotType();
+            const typePatch = (bot.type !== desiredType) ? { type: desiredType } : {};
             const dx = [-1, 0, 1][Math.floor(Math.random() * 3)];
             const dy = [-1, 0, 1][Math.floor(Math.random() * 3)];
             const nx = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.x + dx));
             const ny = Math.max(0, Math.min(GRID_RESOLUTION - 1, bot.y + dy));
-            botRef.update({ x: nx, y: ny, lastMove: now, owner: myId });
+            botRef.update({ x: nx, y: ny, lastMove: now, owner: myId, ...typePatch });
         }
         setInterval(botStep, 100);
 
@@ -647,6 +672,16 @@
             playSound('got_' + type);
         }
 
+        // Two characters collide when their centers are within the combined
+        // collision radius. Since R/P/S all share the same size, the threshold
+        // is 2 * COLLISION_RADIUS_CELLS. Distance is in grid units; works
+        // identically whether GRID_RESOLUTION is 100 or 1024.
+        function isHit(ax, ay, bx, by) {
+            const dx = ax - bx, dy = ay - by;
+            const threshold = COLLISION_RADIUS_CELLS * 2;
+            return (dx * dx + dy * dy) <= (threshold * threshold);
+        }
+
         function checkCollision() {
             if (!isPlaying) return;
             const now = Date.now();
@@ -660,7 +695,7 @@
                 if ((now - (p.lastSeen || 0)) > STALE_MS) continue;
                 // Respect their respawn grace too — can't kill someone who just spawned.
                 if (p.spawnedAt && (now - p.spawnedAt) < RESPAWN_GRACE_MS) continue;
-                if (p.x === myX && p.y === myY) {
+                if (isHit(p.x, p.y, myX, myY)) {
                     if (p.type === myType) return;
                     if (BEATS[myType] === p.type) {
                         lastCollisionAt = now;
@@ -677,36 +712,28 @@
                     return;
                 }
             }
-            if (bot && bot.type) {
-                // Use a small adjacency tolerance for the bot so it stays catchable
-                // (bot moves on a timer, player movement is finger-driven and they
-                // shouldn't need sub-cell precision to land a hit).
-                const TOL = Math.max(1, Math.floor(GRID_RESOLUTION / 50));
-                const dx = Math.abs(bot.x - myX);
-                const dy = Math.abs(bot.y - myY);
-                if (dx <= TOL && dy <= TOL) {
-                    if (bot.type === myType) return;
-                    if (BEATS[myType] === bot.type) {
-                        lastCollisionAt = now;
-                        scoresRef.child(myType).transaction(v => (v || 0) + 1);
-                        spawnDeath(BOT_ID, bot.type, bot.x, bot.y, true, false);
-                        botRef.remove();
-                        isPlaying = false;
-                        invited = true;
-                        playerRef.update({ active: false });
-                        setButton('invite');
-                        dotLocal.style.background = '#eee';
-                    } else {
-                        lastCollisionAt = now;
-                        scoresRef.child(bot.type).transaction(v => (v || 0) + 1);
-                        spawnDeath(myId, myType, myX, myY, false, true);
-                        myLastDeath = { x: myX, y: myY };
-                        isPlaying = false;
-                        invited = false;
-                        setButton('start');
-                        dotLocal.style.background = '#eee';
-                        playerRef.remove();
-                    }
+            if (bot && bot.type && isHit(bot.x, bot.y, myX, myY)) {
+                if (bot.type === myType) return;
+                if (BEATS[myType] === bot.type) {
+                    lastCollisionAt = now;
+                    scoresRef.child(myType).transaction(v => (v || 0) + 1);
+                    spawnDeath(BOT_ID, bot.type, bot.x, bot.y, true, false);
+                    botRef.remove();
+                    isPlaying = false;
+                    invited = true;
+                    playerRef.update({ active: false });
+                    setButton('invite');
+                    dotLocal.style.background = '#eee';
+                } else {
+                    lastCollisionAt = now;
+                    scoresRef.child(bot.type).transaction(v => (v || 0) + 1);
+                    spawnDeath(myId, myType, myX, myY, false, true);
+                    myLastDeath = { x: myX, y: myY };
+                    isPlaying = false;
+                    invited = false;
+                    setButton('start');
+                    dotLocal.style.background = '#eee';
+                    playerRef.remove();
                 }
             }
         }
@@ -715,8 +742,7 @@
         // Each character is a <g> node. Currently renders a <text> (R/P/S letter).
         // To swap in SVG icons later: set ICON_PATHS[type] to a URL, then update
         // renderCharContent() below to emit <image href="..."> instead of <text>.
-        // The character is centered on its grid cell and sized via CHAR_SIZE_CELLS.
-        const CHAR_SIZE_CELLS = 8; // character visual size in grid cells (big & bold like weja)
+        // CHAR_SIZE_CELLS controls visual size; it's defined in the tunables block.
         const visualPos = {};
 
         function renderCharContent(node, type, isMe, isBot) {
