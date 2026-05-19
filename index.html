@@ -443,6 +443,7 @@
             const activeCount = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS).length;
             playerCountEl.textContent = activeCount;
             maybeAutoStart(activeCount);
+            maybeInitialBotWipe();
         });
 
         function maybeAutoStart(activeCount) {
@@ -459,18 +460,27 @@
         // ===== Multi-bot listener =====
         // Track per-bot state and detect disappearances for death animation.
         const prevBots = {};
+        // Set of bot IDs being removed for housekeeping (corrupt, multiplayer
+        // cleanup, etc.) — suppress death animation for these.
+        const silentBotRemovals = new Set();
+
         botsRef.on('value', (snap) => {
             const next = snap.val() || {};
-            // Detect removed bots → spawn death anim where they were
+            // Detect removed bots → spawn death anim where they were,
+            // unless the removal was housekeeping.
             for (const id in prevBots) {
                 if (!next[id] && prevBots[id] && prevBots[id].type) {
-                    spawnDeath('bot-' + id, prevBots[id].type, prevBots[id].x, prevBots[id].y, true, false);
+                    if (silentBotRemovals.has(id)) {
+                        silentBotRemovals.delete(id);
+                    } else {
+                        spawnDeath('bot-' + id, prevBots[id].type, prevBots[id].x, prevBots[id].y, true, false);
+                    }
                 }
             }
             bots = next;
-            // Snapshot current bots for next diff
             for (const k in prevBots) delete prevBots[k];
             for (const k in next) prevBots[k] = next[k];
+            maybeInitialBotWipe();
         });
 
         playerRef.on('value', (snap) => {
@@ -534,7 +544,7 @@
             };
         }
 
-        function spawnBot(spawnPos) {
+        function spawnBot(spawnPos, onComplete) {
             // Adds a new bot to the database, owned by me.
             const now = Date.now();
             const id = Math.random().toString(36).substr(2, 9);
@@ -556,35 +566,87 @@
                 owner: myId,
                 spawnedAt: now,
                 lastTick: now
-            });
+            }, () => { if (onComplete) onComplete(); });
+        }
+
+        // ===== Initial cleanup =====
+        // On first load, if I become the only player (solo), wipe any leftover
+        // bots from previous sessions. This prevents the "4 flashing letters
+        // in corners" issue where ghost bots from a prior session briefly
+        // appear before being cleaned up. The first manageBots tick will
+        // then spawn a fresh bot.
+        let didInitialBotWipe = false;
+        function maybeInitialBotWipe() {
+            if (didInitialBotWipe) return;
+            if (!myType) return;
+            const activeIds = getActivePlayerIds();
+            if (activeIds.length !== 1 || activeIds[0] !== myId) return;
+            didInitialBotWipe = true;
+            // Mark all current bots for silent removal so we don't see their deaths
+            for (const id in bots) silentBotRemovals.add(id);
+            botsRef.remove();
         }
 
         // Periodic management: ensure correct number of bots exist (solo only),
         // claim ownership of any orphaned bots, drop ownership when multiplayer.
+        // Also cleans up corrupted/stale bots from previous sessions.
+        let spawnInFlight = false;
+
         function manageBots() {
             const now = Date.now();
             const activeIds = getActivePlayerIds();
             const alone = activeIds.length <= 1;
-            const botCount = Object.keys(bots).length;
+            const activeIdSet = new Set(activeIds);
+
+            // Identify valid bots (those with proper schema fields).
+            const validBots = {};
+            const corruptBotIds = [];
+            for (const id in bots) {
+                const b = bots[id];
+                if (b && typeof b.x === 'number' && typeof b.y === 'number'
+                    && typeof b.dx === 'number' && typeof b.dy === 'number'
+                    && !isNaN(b.x) && !isNaN(b.y) && !isNaN(b.dx) && !isNaN(b.dy)
+                    && b.type) {
+                    validBots[id] = b;
+                } else {
+                    corruptBotIds.push(id);
+                }
+            }
+            // Remove corrupt bots (leftover from old schema or partial writes).
+            // Only the leader does this so we don't all stampede.
+            // Suppress death animation — these aren't kills, just cleanup.
+            if (isLeader()) {
+                for (const id of corruptBotIds) {
+                    silentBotRemovals.add(id);
+                    botsRef.child(id).remove();
+                }
+            }
+
+            const botCount = Object.keys(validBots).length;
 
             if (!alone) {
-                // Multiplayer: leader clears bots.
+                // Multiplayer: leader clears all bots. Silent — no death anims.
                 if (isLeader() && botCount > 0) {
+                    for (const id in validBots) silentBotRemovals.add(id);
                     botsRef.remove();
                 }
                 return;
             }
 
-            // Solo: ensure at least 1 bot exists. Only the leader spawns to avoid races.
-            if (alone && isLeader() && botCount === 0 && myType) {
-                spawnBot(lastBotKillPos);
+            // Solo: leader ensures exactly one bot to start. Use a flag so we
+            // don't spawn multiple before the write propagates.
+            if (alone && isLeader() && botCount === 0 && myType && !spawnInFlight) {
+                spawnInFlight = true;
+                spawnBot(lastBotKillPos, () => { spawnInFlight = false; });
             }
 
-            // Claim orphaned bots: any bot whose owner is stale becomes mine.
-            for (const id in bots) {
-                const b = bots[id];
-                if (!b) continue;
-                if (b.owner !== myId && (now - (b.lastTick || 0)) > BOT_OWNER_TIMEOUT_MS) {
+            // Claim orphaned bots: any bot whose owner is no longer active OR
+            // whose owner heartbeat is stale becomes mine.
+            for (const id in validBots) {
+                const b = validBots[id];
+                const ownerActive = activeIdSet.has(b.owner);
+                const heartbeatStale = (now - (b.lastTick || 0)) > BOT_OWNER_TIMEOUT_MS;
+                if (b.owner !== myId && (!ownerActive || heartbeatStale)) {
                     botsRef.child(id).update({ owner: myId, lastTick: now });
                 }
             }
