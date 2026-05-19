@@ -35,9 +35,20 @@
             color: #ccc;
             display: flex; align-items: center; justify-content: center;
             margin-left: 4px;
+            transition: transform 0.5s cubic-bezier(0.2, 0.8, 0.4, 1);
+            transform-origin: center;
         }
         #sound-toggle:hover { color: #888; }
         #sound-toggle.on { color: var(--ink); }
+        #sound-toggle.pulse {
+            animation: sound-pulse 0.5s cubic-bezier(0.2, 0.8, 0.4, 1);
+            color: var(--highlight);
+        }
+        @keyframes sound-pulse {
+            0%   { transform: scale(1); }
+            40%  { transform: scale(3); }
+            100% { transform: scale(1); }
+        }
         #sound-toggle svg { width: 100%; height: 100%; display: block; }
 
         #player-count {
@@ -1046,9 +1057,36 @@
             got_S: synthScissorsSwish
         };
 
+        function pulseSoundIcon() {
+            // Re-trigger the CSS animation by removing and re-adding the class.
+            // Force reflow between toggles or successive triggers would no-op.
+            soundToggle.classList.remove('pulse');
+            // Reading offsetWidth forces a layout flush, which restarts the animation.
+            void soundToggle.offsetWidth;
+            soundToggle.classList.add('pulse');
+        }
+        // Clean up the pulse class after the animation ends so the hover state
+        // and 'on' color return to normal.
+        document.addEventListener('animationend', (e) => {
+            if (e.target && e.target.id === 'sound-toggle') {
+                e.target.classList.remove('pulse');
+            }
+        });
+
         function playSound(name) {
-            if (!soundOn) return;
-            ensureAudioCtx();
+            // If sound is off, just give a visual nudge that something happened.
+            if (!soundOn) {
+                pulseSoundIcon();
+                return;
+            }
+            const ctx = ensureAudioCtx();
+            // Background tabs can have a suspended AudioContext (especially
+            // mobile Chrome). Try to resume it on-demand. resume() returns a
+            // promise; if the gesture-credit has expired (rare), the call is
+            // a no-op and the sound is silently dropped.
+            if (ctx && ctx.state === 'suspended') {
+                ctx.resume().catch(() => {});
+            }
             const path = SOUND_PATHS[name];
             if (path && soundBuffers[path]) {
                 playBuffer(soundBuffers[path]);
@@ -1056,6 +1094,14 @@
                 SYNTH[name]();
             }
         }
+
+        // Resume audio context whenever the tab becomes visible again — covers
+        // the case where the browser suspended it while the tab was hidden.
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume().catch(() => {});
+            }
+        });
 
         // ===== Sound toggle UI =====
         const soundToggle = document.getElementById('sound-toggle');
@@ -1102,6 +1148,48 @@
         setTimeout(() => { joinSoundArmed = true; }, 1500);
         const knownPlayerIds = new Set();
 
+        // ===== Title flash when backgrounded =====
+        // When the tab isn't visible and someone joins, flash the tab title so
+        // the user notices in their tab strip. Clears when they refocus.
+        const ORIGINAL_TITLE = document.title;
+        let titleFlashTimer = null;
+        let pendingJoiners = 0;
+
+        function flashTitle() {
+            if (!document.hidden) return;
+            pendingJoiners++;
+            updateFlashedTitle();
+            // Toggle between original and notice every 1s for max ~10s
+            if (titleFlashTimer) return;
+            let toggle = false;
+            titleFlashTimer = setInterval(() => {
+                if (!document.hidden) {
+                    stopTitleFlash();
+                    return;
+                }
+                toggle = !toggle;
+                document.title = toggle ? ORIGINAL_TITLE : flashedLabel();
+            }, 1000);
+            // Stop after 30s even if not refocused
+            setTimeout(stopTitleFlash, 30000);
+        }
+        function flashedLabel() {
+            return pendingJoiners === 1
+                ? '👋 someone joined — rps'
+                : `👋 ${pendingJoiners} joined — rps`;
+        }
+        function updateFlashedTitle() {
+            if (document.hidden) document.title = flashedLabel();
+        }
+        function stopTitleFlash() {
+            if (titleFlashTimer) { clearInterval(titleFlashTimer); titleFlashTimer = null; }
+            document.title = ORIGINAL_TITLE;
+            pendingJoiners = 0;
+        }
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) stopTitleFlash();
+        });
+
         playersRef.on('child_added', (snap) => {
             const id = snap.key;
             if (knownPlayerIds.has(id)) return;
@@ -1109,6 +1197,7 @@
             if (!joinSoundArmed) return;
             if (id === myId) return; // don't beep at ourselves
             playSound('join');
+            if (document.hidden) flashTitle();
         });
         playersRef.on('child_removed', (snap) => {
             knownPlayerIds.delete(snap.key);
