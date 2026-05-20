@@ -202,7 +202,7 @@
             <div class="score"><div class="label">P</div><div class="value" id="score-P">0</div></div>
             <div class="score"><div class="label">S</div><div class="value" id="score-S">0</div></div>
         </div>
-        <button id="action-btn">START</button>
+        <button id="action-btn" class="invite">Play with real humans: Click to copy URL to clipboard</button>
     </div>
 
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
@@ -278,8 +278,7 @@
         let allPlayers = {};
         let bots = {};                // id -> {type, x, y, dx, dy, owner, spawnedAt, lastTick}
         let scores = { R: 0, P: 0, S: 0 };
-        let invited = false;
-        let invitedOnce = false;     // true after the first time we've shown the invite prompt this session
+        let currentButtonState = 'invite';  // 'invite' | 'copied'
         // Death animation pool: keyed by a unique anim id.
         // Each entry: { id, type, x, y, isBot, isMe, startedAt }
         // Renderer draws these for SCORE_ANIM_MS, scaling 1→2 and fading 1→0.
@@ -288,6 +287,10 @@
         let lastBotKillPos = null;    // last cell where a bot was killed
         let respawnedAt = 0; // Date.now() when I last (re)spawned
         let lastActiveCount = 0; // tracks player count between updates so we can detect transitions
+        let activeCountInitialized = false; // suppresses announcement on the very first listener fire
+        const announcedPlayerIds = new Set(); // player IDs we've already announced (so respawns don't re-fire)
+        let lastAnnouncedAt = 0;
+        const ANNOUNCE_COOLDOWN_MS = 30000; // minimum gap between arena announcements
 
         const NAME_POOL = {
             R: ['Boulder','Pebble','Granite','Flint','Slate','Cobble','Quartz','Gravel','Stone','Basalt','Marble','Chalk'],
@@ -472,25 +475,62 @@
             const activeCount = Object.values(allPlayers).filter(p => p && p.lastSeen && (now - p.lastSeen) < STALE_MS).length;
             playerCountEl.textContent = activeCount;
 
-            // Detect transition from solo (1) to multiplayer (≥2):
-            // a real human just joined while I was alone with bots.
-            if (lastActiveCount <= 1 && activeCount >= 2) {
-                showArenaAnnouncement('A real human has entered the arena');
+            // Detect when a genuinely new human joins while we were otherwise alone.
+            // Track player IDs we've already announced so respawns (player gets
+            // killed → record removed → record recreated under same id) don't re-fire.
+            // Skip on the very first fire of this listener (we don't know yet
+            // whether anyone is "new").
+            if (activeCountInitialized && lastActiveCount <= 1 && activeCount >= 2) {
+                const now2 = Date.now();
+                let newcomerId = null;
+                for (const id in next) {
+                    if (id === myId) continue;
+                    if (announcedPlayerIds.has(id)) continue;
+                    const p = next[id];
+                    if (p && p.lastSeen && (now2 - p.lastSeen) < STALE_MS) {
+                        newcomerId = id;
+                        break;
+                    }
+                }
+                if (newcomerId && (now2 - lastAnnouncedAt) > ANNOUNCE_COOLDOWN_MS) {
+                    announcedPlayerIds.add(newcomerId);
+                    lastAnnouncedAt = now2;
+                    showArenaAnnouncement('A real human has entered the arena');
+                } else if (newcomerId) {
+                    // Still record this id so we don't re-announce them later
+                    announcedPlayerIds.add(newcomerId);
+                }
+            }
+            // Also: any active player we've never seen is now known.
+            // Prevents announcing them later if they happen to be present
+            // during a transition.
+            for (const id in next) {
+                if (id !== myId) announcedPlayerIds.add(id);
             }
             lastActiveCount = activeCount;
+            activeCountInitialized = true;
 
-            maybeAutoStart(activeCount);
+            updateGameMode(activeCount);
             maybeInitialBotWipe();
         });
 
-        function maybeAutoStart(activeCount) {
-            // If 2+ real players are present and we're not yet playing, auto-start.
-            // Skip if we're in the post-bot-catch invite state (user is reading the prompt).
-            if (activeCount >= 2 && !isPlaying && myType && !invited) {
+        function isSoloMode() {
+            // Solo/bot mode: I'm the only active human (others are bots).
+            return getActivePlayerIds().length <= 1;
+        }
+
+        function updateGameMode(activeCount) {
+            // The game is always running — no start/stop. Just ensure we're active
+            // and that the button shows the permanent invite prompt.
+            if (!myType) return;
+            if (!isPlaying) {
                 isPlaying = true;
-                setButton('stop');
                 playerRef.update({ active: true, lastSeen: Date.now() });
                 dotLocal.style.background = 'var(--status-green)';
+            }
+            // Keep the invite button up unless mid "copied" confirmation.
+            if (currentButtonState !== 'copied') {
+                setButton('invite');
             }
         }
 
@@ -523,12 +563,10 @@
         playerRef.on('value', (snap) => {
             const me = snap.val();
             if (!me && myType) {
+                // I was removed (got got). Rejoin — updateGameMode will set me
+                // active again automatically on the next players snapshot.
                 isPlaying = false;
-                setButton('start');
                 joinGame();
-            } else if (me && me.active === false && isPlaying) {
-                isPlaying = false;
-                setButton('start');
             }
         });
 
@@ -779,45 +817,23 @@
             arenaAnnounceEl.classList.remove('show');
         });
 
-        // ===== Buttons =====
+        // ===== Button (always the "invite humans / copy URL" control) =====
+        // The game is always running; there is no start/stop. The button only
+        // ever copies the URL so people can invite real humans.
         function setButton(state) {
-            actionBtn.classList.remove('playing', 'invite');
-            if (state === 'start') {
-                actionBtn.textContent = 'START';
-            } else if (state === 'stop') {
-                actionBtn.textContent = 'STOP';
-                actionBtn.classList.add('playing');
-            } else if (state === 'invite') {
-                actionBtn.textContent = 'For multiplayer: Copy and share URL';
-                actionBtn.classList.add('invite');
-            } else if (state === 'copied') {
+            actionBtn.classList.add('invite');
+            actionBtn.classList.remove('playing');
+            if (state === 'copied') {
                 actionBtn.textContent = 'URL copied to clipboard';
-                actionBtn.classList.add('invite');
+            } else {
+                actionBtn.textContent = 'Play with real humans: Click to copy URL to clipboard';
             }
+            currentButtonState = state;
         }
         actionBtn.addEventListener('click', () => {
-            if (!myType) return;
-            if (invited) {
-                // First tap after catching bot: copy URL and show confirmation
-                if (actionBtn.textContent !== 'URL copied to clipboard') {
-                    doCopy();
-                    setButton('copied');
-                    // After a moment, return to start state so they can play again
-                    setTimeout(() => {
-                        invited = false;
-                        if (!isPlaying) setButton('start');
-                    }, 1800);
-                    return;
-                }
-                // (rare path) tap again while showing 'copied' - just reset
-                invited = false;
-                setButton('start');
-                return;
-            }
-            isPlaying = !isPlaying;
-            setButton(isPlaying ? 'stop' : 'start');
-            playerRef.update({ active: isPlaying, lastSeen: Date.now() });
-            dotLocal.style.background = isPlaying ? 'var(--status-green)' : '#eee';
+            doCopy();
+            setButton('copied');
+            setTimeout(() => setButton('invite'), 1800);
         });
 
         function doCopy() {
@@ -975,27 +991,15 @@
                                 cornerY + (Math.random() - 0.5) * scatter))
                         });
                     }
-                    // Show invite prompt only the FIRST time the player gets a bot in a session.
-                    // After that, just keep playing (the game escalates).
-                    if (!invitedOnce) {
-                        invitedOnce = true;
-                        isPlaying = false;
-                        invited = true;
-                        playerRef.update({ active: false });
-                        setButton('invite');
-                        dotLocal.style.background = '#eee';
-                    }
+                    // Game keeps running — no invite prompt interruption, no stop.
                     return;
                 } else {
-                    // Player loses to this bot
+                    // Player loses to this bot — respawn and keep playing.
                     lastCollisionAt = now;
                     scoresRef.child(b.type).transaction(v => (v || 0) + 1);
                     spawnDeath(myId, myType, myX, myY, false, true);
                     myLastDeath = { x: myX, y: myY };
                     isPlaying = false;
-                    invited = false;
-                    setButton('start');
-                    dotLocal.style.background = '#eee';
                     playerRef.remove();
                     return;
                 }
