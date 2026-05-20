@@ -144,7 +144,20 @@
         }
         .score { display: flex; flex-direction: column; align-items: center; gap: 4px; }
         .score .label { font-size: 0.75rem; color: #aaa; letter-spacing: 3px; }
-        .score .value { font-size: 1.6rem; font-weight: 100; }
+        .score .value {
+            font-size: 1.6rem; font-weight: 100;
+            display: inline-block;
+            transform-origin: center;
+            color: var(--ink);
+        }
+        .score .value.pulse {
+            animation: score-pulse 0.5s cubic-bezier(0.2, 0.8, 0.4, 1);
+        }
+        @keyframes score-pulse {
+            0%   { transform: scale(1); }
+            40%  { transform: scale(3); }
+            100% { transform: scale(1); }
+        }
 
         #action-btn {
             font-family: 'Roboto', sans-serif; font-weight: 300;
@@ -570,11 +583,24 @@
             }
         });
 
+        function pulseScore(el) {
+            el.classList.remove('pulse');
+            void el.offsetWidth; // force reflow to restart animation
+            el.classList.add('pulse');
+        }
+        Object.values(scoreEls).forEach(el => {
+            el.addEventListener('animationend', () => el.classList.remove('pulse'));
+        });
+
         scoresRef.on('value', (snap) => {
-            scores = snap.val() || { R: 0, P: 0, S: 0 };
-            scoreEls.R.textContent = scores.R || 0;
-            scoreEls.P.textContent = scores.P || 0;
-            scoreEls.S.textContent = scores.S || 0;
+            const next = snap.val() || { R: 0, P: 0, S: 0 };
+            ['R', 'P', 'S'].forEach(t => {
+                const prevVal = scores[t] || 0;
+                const nextVal = next[t] || 0;
+                scoreEls[t].textContent = nextVal;
+                if (nextVal > prevVal) pulseScore(scoreEls[t]);
+            });
+            scores = next;
         });
 
         // ===== Bot management =====
