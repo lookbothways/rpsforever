@@ -442,7 +442,14 @@
         function joinGame() {
             playersRef.once('value', (snap) => {
                 const current = snap.val() || {};
-                myType = assignTeam(current);
+                // In solo mode (no other humans present), keep the same type on respawn.
+                // Bots are always spawned as BEATS[myType], so changing type after death
+                // would leave the player facing unbeatable (or same-type) bots.
+                // Only assign fresh on first join or when in multiplayer.
+                const otherHumans = Object.values(current).filter(p => p && p.type).length;
+                if (!myType || otherHumans > 0) {
+                    myType = assignTeam(current);
+                }
                 myName = makeName(myType);
                 const teamFull = { R: 'Rock', P: 'Paper', S: 'Scissors' }[myType];
                 myNameEl.textContent = teamFull;
