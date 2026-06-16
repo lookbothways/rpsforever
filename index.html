@@ -1598,7 +1598,10 @@
             try {
                 const perm = await Notification.requestPermission();
                 if (perm !== 'granted') { setNotifyMsg('Permission not granted. You can try again any time.'); return; }
-                const supported = await firebase.messaging.isSupported().catch(() => false);
+                // Compat SDK returns a boolean here (modular returns a promise);
+                // await handles both, and the try/catch swallows either failure.
+                let supported = false;
+                try { supported = await firebase.messaging.isSupported(); } catch { supported = false; }
                 if (!supported) { setNotifyMsg('This browser doesn’t support web push.'); return; }
                 if (!messaging) messaging = firebase.messaging();
                 const reg = (await navigator.serviceWorker.getRegistration('./sw.js'))
