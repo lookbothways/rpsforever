@@ -1,0 +1,13 @@
+{
+  "name": "rps-forever-admin",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Reads push tokens from RTDB and sends a 'someone joined' FCM push to every subscriber.",
+  "scripts": {
+    "send": "node send-fcm.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.6.0"
+  }
+}

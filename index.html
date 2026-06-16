@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>rps</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="rps">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -181,6 +187,24 @@
             text-align: center;
             line-height: 1.4;
         }
+
+        #notify-btn {
+            font-family: 'Roboto', sans-serif; font-weight: 300;
+            font-size: 0.8rem; letter-spacing: 1px;
+            color: #888;
+            background: none;
+            border: none;
+            padding: 2px 8px;
+            cursor: pointer;
+            transition: color 0.2s ease;
+        }
+        #notify-btn:hover { color: var(--ink); }
+        #notify-btn.on { color: var(--status-green); }
+        #notify-msg {
+            font-size: 0.7rem; font-weight: 300; color: #bbb;
+            letter-spacing: 0.5px; text-align: center;
+            min-height: 0.9rem; max-width: 90vw;
+        }
     </style>
 </head>
 <body>
@@ -216,24 +240,21 @@
             <div class="score"><div class="label">S</div><div class="value" id="score-S">0</div></div>
         </div>
         <button id="action-btn" class="invite">Play with real humans: Click to copy URL to clipboard</button>
+        <button id="notify-btn" type="button">🔔 Notify me when someone joins</button>
+        <div id="notify-msg"></div>
     </div>
 
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-messaging-compat.js"></script>
+    <script src="firebase-config.js"></script>
 
     <script>
         // ===== Firebase (RPSforever Spark project) =====
-        // REPLACE THESE VALUES WITH YOUR NEW RPSforever CONFIG FROM THE FIREBASE CONSOLE
-        const firebaseConfig = {
-          apiKey: "AIzaSyDCev1bJXI0jGqKvMzrXnSRcZKEwQhRP8s",
-          authDomain: "rpsforever.firebaseapp.com",
-          databaseURL: "https://rpsforever-default-rtdb.europe-west1.firebasedatabase.app",
-          projectId: "rpsforever",
-          storageBucket: "rpsforever.firebasestorage.app",
-          messagingSenderId: "577664413632",
-          appId: "1:577664413632:web:0efa4b3ab683399a8e6225"
-        };
+        // Config lives in firebase-config.js (self.RPS_CONFIG) so the page,
+        // the service worker, and the admin send script all share one source.
+        const firebaseConfig = self.RPS_CONFIG.firebase;
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
@@ -1507,6 +1528,157 @@
         setInterval(() => {
             if (myType) playerRef.update({ lastSeen: Date.now() });
         }, 4000);
+
+        // =====================================================================
+        //  Push notifications — "Notify me when someone joins"
+        //  Mirrors the Stretch Goals FCM setup. A device opts in, we grab an
+        //  FCM token and store it under /subs/{anonymous-uid}. A manual push
+        //  (GitHub Action → scripts/send-fcm.mjs) fans out to every stored
+        //  token. No identity is stored — just an opaque token + timestamp.
+        // =====================================================================
+        const NOTIFY_LS = 'rps.notify';          // '1' once the user has opted in
+        const VAPID_KEY = self.RPS_CONFIG.vapidKey;
+        let messaging = null;
+
+        const notifyBtn = document.getElementById('notify-btn');
+        const notifyMsg = document.getElementById('notify-msg');
+
+        function setNotifyMsg(t) { notifyMsg.textContent = t || ''; }
+        function setNotifyOn(on) {
+            if (on) {
+                notifyBtn.classList.add('on');
+                notifyBtn.textContent = '🔔 You’ll be notified — tap to turn off';
+            } else {
+                notifyBtn.classList.remove('on');
+                notifyBtn.textContent = '🔔 Notify me when someone joins';
+            }
+        }
+
+        function isStandalone() {
+            return window.matchMedia('(display-mode: standalone)').matches
+                || window.navigator.standalone === true;
+        }
+        function isIOS() {
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        }
+
+        // The game already signs in anonymously; wait for the uid to be ready.
+        function ensureAuthUid() {
+            if (auth.currentUser) return Promise.resolve(auth.currentUser);
+            return new Promise((resolve, reject) => {
+                auth.signInAnonymously().catch(() => {}); // harmless if already in flight
+                const off = auth.onAuthStateChanged(u => { if (u) { off(); resolve(u); } });
+                setTimeout(() => reject(new Error('auth timeout')), 8000);
+            });
+        }
+
+        async function writeSubscription(token) {
+            const u = await ensureAuthUid();
+            await db.ref('subs/' + u.uid).set({
+                token,
+                updatedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+        }
+
+        async function notifyTurnOn() {
+            if (VAPID_KEY.startsWith('REPLACE_ME')) {
+                setNotifyMsg('Notifications aren’t set up on this site yet. (Owner: add the VAPID key to firebase-config.js.)');
+                return;
+            }
+            if (isIOS() && !isStandalone()) {
+                setNotifyMsg('On iPhone: tap Share → Add to Home Screen, then open it from there and try again.');
+                return;
+            }
+            if (!('Notification' in window) || !('serviceWorker' in navigator)) {
+                setNotifyMsg('This browser doesn’t support notifications.');
+                return;
+            }
+            notifyBtn.disabled = true;
+            setNotifyMsg('Asking permission…');
+            try {
+                const perm = await Notification.requestPermission();
+                if (perm !== 'granted') { setNotifyMsg('Permission not granted. You can try again any time.'); return; }
+                const supported = await firebase.messaging.isSupported().catch(() => false);
+                if (!supported) { setNotifyMsg('This browser doesn’t support web push.'); return; }
+                if (!messaging) messaging = firebase.messaging();
+                const reg = (await navigator.serviceWorker.getRegistration('./sw.js'))
+                         || (await navigator.serviceWorker.register('./sw.js'));
+                await navigator.serviceWorker.ready;
+                const token = await messaging.getToken({ vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
+                if (!token) { setNotifyMsg('Could not get a push token. Try again.'); return; }
+                await writeSubscription(token);
+                localStorage.setItem(NOTIFY_LS, '1');
+                setNotifyOn(true);
+                setNotifyMsg('Done — you’ll get a ping when someone joins.');
+            } catch (e) {
+                console.error(e);
+                setNotifyMsg('Something went wrong: ' + (e?.message || e));
+            } finally {
+                notifyBtn.disabled = false;
+            }
+        }
+
+        async function notifyTurnOff() {
+            notifyBtn.disabled = true;
+            setNotifyMsg('Turning off…');
+            try {
+                if (messaging) { try { await messaging.deleteToken(); } catch (e) { console.warn('deleteToken', e); } }
+                if (auth.currentUser) {
+                    try { await db.ref('subs/' + auth.currentUser.uid).remove(); } catch (e) { console.warn('remove sub', e); }
+                }
+                localStorage.removeItem(NOTIFY_LS);
+                setNotifyOn(false);
+                setNotifyMsg('Notifications are off. Tap to turn them back on.');
+            } finally {
+                notifyBtn.disabled = false;
+            }
+        }
+
+        notifyBtn.addEventListener('click', () => {
+            if (notifyBtn.disabled) return;
+            if (notifyBtn.classList.contains('on')) return notifyTurnOff();
+            return notifyTurnOn();
+        });
+
+        // Foreground: if a push arrives while the tab is open, show it too.
+        function setupForegroundPush() {
+            try {
+                if (!messaging) messaging = firebase.messaging();
+                messaging.onMessage(async payload => {
+                    const d = payload?.data || payload?.notification || {};
+                    const title = d.title || 'rps forever';
+                    const body  = d.body  || 'Someone just entered the arena. Come play!';
+                    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+                        const reg = await navigator.serviceWorker.ready;
+                        reg.showNotification(title, {
+                            body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png',
+                            tag: 'rps-' + Date.now(), renotify: true
+                        });
+                    }
+                });
+            } catch (e) { console.warn('foreground push', e); }
+        }
+
+        // Reflect saved state on load. "On" only if the browser still has
+        // permission AND the user opted in on this device.
+        (function initNotify() {
+            const permGranted = 'Notification' in window && Notification.permission === 'granted';
+            const wantsOn = localStorage.getItem(NOTIFY_LS) === '1';
+            if (permGranted && wantsOn && !VAPID_KEY.startsWith('REPLACE_ME')) {
+                setNotifyOn(true);
+                setupForegroundPush();
+                // Refresh the stored token in case it rotated.
+                ensureAuthUid().then(async () => {
+                    if (!messaging) messaging = firebase.messaging();
+                    const reg = await navigator.serviceWorker.getRegistration('./sw.js');
+                    if (!reg) return;
+                    const token = await messaging.getToken({ vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
+                    if (token) writeSubscription(token);
+                }).catch(() => {});
+            } else if (isIOS() && !isStandalone()) {
+                setNotifyMsg('Tip: add this page to your Home Screen to get join alerts on iPhone.');
+            }
+        })();
     </script>
 </body>
 </html>

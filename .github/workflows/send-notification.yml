@@ -1,0 +1,45 @@
+name: Send "someone joined" notification
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "Notification title (kept short)"
+        required: false
+        default: "rps forever"
+      message:
+        description: "The notification message"
+        required: false
+        default: "Someone just entered the arena. Come play!"
+      dry_run:
+        description: "Dry run? Counts subscribers but sends nothing."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Send notification
+        working-directory: scripts
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          TITLE:   ${{ inputs.title }}
+          MESSAGE: ${{ inputs.message }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: node send-fcm.mjs
