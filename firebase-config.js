@@ -22,6 +22,6 @@ self.RPS_CONFIG = {
   // The VAPID web-push public key.
   // Firebase Console → Project Settings → Cloud Messaging tab →
   // Web configuration → Web Push certificates → Generate key pair → copy here.
-  vapidKey: "REPLACE_ME_VAPID_PUBLIC_KEY",
+  vapidKey: "BBkyybpAoKIU55QmKXNjk_LQd_8-qfSG6oEyQE6wF4GQvCfypYmGejYKMGttp2oV29VkjYb3Mgnt7EKlYrQc2iU",
   adminUrl: "https://github.com/lookbothways/rpsForever/actions"
 };
