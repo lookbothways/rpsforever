@@ -1,0 +1,11 @@
+# Node deps (installed per-machine, e.g. on the Pi)
+node_modules/
+scripts/node_modules/
+
+# Secrets — the Firebase service-account key must never be committed
+serviceAccount.json
+*serviceAccount*.json
+scripts/serviceAccount.json
+
+# OS cruft
+.DS_Store

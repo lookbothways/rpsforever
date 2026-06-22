@@ -5,9 +5,10 @@
   "version": "1.0.0",
   "description": "Reads push tokens from RTDB and sends a 'someone joined' FCM push to every subscriber.",
   "scripts": {
-    "send": "node send-fcm.mjs"
+    "send": "node send-fcm.mjs",
+    "watch": "node watch-joins.mjs"
   },
   "dependencies": {
-    "firebase-admin": "^12.6.0"
+    "firebase-admin": "^11.11.1"
   }
 }
