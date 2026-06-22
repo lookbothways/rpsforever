@@ -1,9 +1,9 @@
 // rps forever — automatic join watcher.
 //
 // Holds a live connection to the Realtime Database and pushes a notification
-// to every /subs token when the arena goes from "empty/solo" to "two or more
-// real humans" — i.e. the moment it's actually worth telling people to come
-// play. Event-driven, so it fires within ~1s of the join.
+// to every /subs token when the arena goes from empty to occupied — i.e. the
+// first real human shows up, so a lone arrival can summon everyone else.
+// Event-driven, so it fires within ~1s of the join.
 //
 // Stays on the free Spark plan (no Blaze, no Cloud Functions). It just needs
 // to keep running somewhere. See the run instructions at the bottom.
@@ -101,8 +101,9 @@ db.ref("players").on("value", async (snap) => {
     console.log(`[watch-joins] baseline active humans = ${count}`);
     return;
   }
-  // Fire only on the empty/solo -> 2+ transition, rate-limited.
-  if (prevCount <= 1 && count >= 2) {
+  // Fire when the arena goes from empty to occupied (0 -> 1+), so a lone
+  // arrival can summon everyone. Rate-limited by the cooldown below.
+  if (prevCount === 0 && count >= 1) {
     const now = Date.now();
     if (now - lastNotifiedAt >= COOLDOWN_MS) {
       lastNotifiedAt = now;
